@@ -160,7 +160,7 @@ class McpServerToolCallEventsTest {
     }
 
     @Test
-    void shouldUseLocalSessionIdWhenNoSessionHeader() {
+    void shouldUseAnonymousSessionIdWhenNoSessionHeader() {
         final var mcpServer = McpServer.builder("test", "1.0")
             .tool(new EchoTool())
             .build();
@@ -176,8 +176,8 @@ class McpServerToolCallEventsTest {
             .assertStatus(200);
 
         assertThat(received).hasSize(2);
-        assertThat(received.get(0).sessionId()).isEqualTo("local");
-        assertThat(received.get(1).sessionId()).isEqualTo("local");
+        assertThat(received.get(0).sessionId()).isEqualTo("anonymous");
+        assertThat(received.get(1).sessionId()).isEqualTo("anonymous");
     }
 
     @Test

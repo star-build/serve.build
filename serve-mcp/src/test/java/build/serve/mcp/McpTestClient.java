@@ -30,6 +30,7 @@ import build.base.json.JsonString;
 import build.base.json.JsonValue;
 import build.serve.foundation.routing.RouterBuilder;
 import build.serve.testing.TestRequest;
+import build.serve.testing.TestResponse;
 import build.serve.testing.TestServer;
 
 import java.util.List;
@@ -174,6 +175,17 @@ final class McpTestClient implements AutoCloseable {
      */
     TestRequest post(final String path) {
         return server.post(path);
+    }
+
+    /**
+     * Sends {@code DELETE /mcp} for the current session, terminating it.
+     */
+    TestResponse deleteSession() {
+        var req = server.delete(MCP_PATH);
+        if (sessionId != null) {
+            req = req.header("Mcp-Session-Id", sessionId);
+        }
+        return req.send();
     }
 
     @Override

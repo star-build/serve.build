@@ -43,6 +43,7 @@ import java.io.PipedOutputStream;
 import java.io.PrintWriter;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -537,6 +538,18 @@ class McpStdioTests {
             .map(v -> ((JsonNumber) v.asObject().members().get("id")).toNumber().intValue())
             .toList();
         assertThat(ids).containsExactlyInAnyOrder(1, 2);
+    }
+
+    @Test
+    void shouldReturnInvalidRequestForBatchOverLimit() {
+        final var items = String.join(",", Collections.nCopies(70_000, "{}"));
+
+        final var out = new ByteArrayOutputStream();
+        server.stdioLoop(toStream("[" + items + "]\n"), out);
+
+        final var response = Json.parse(out.toString(StandardCharsets.UTF_8).strip()).asObject();
+        assertThat(response.get("error").asObject().get("code").asNumber().toNumber().intValue())
+            .isEqualTo(-32600);
     }
 
     @Test

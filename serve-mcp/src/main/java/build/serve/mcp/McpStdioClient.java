@@ -29,6 +29,7 @@ import build.base.json.JsonObject;
 import build.base.json.JsonString;
 import build.base.json.JsonValue;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
@@ -42,6 +43,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 
 /**
@@ -64,6 +66,7 @@ import java.util.function.Consumer;
 public final class McpStdioClient implements AutoCloseable {
 
     private static final Duration DEFAULT_SEND_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration DEFAULT_CLOSE_TIMEOUT = Duration.ofSeconds(5);
     private static final Consumer<JsonObject> NO_OP_NOTIFICATION_HANDLER = n -> {
     };
 
@@ -71,18 +74,22 @@ public final class McpStdioClient implements AutoCloseable {
     private final LineQueue lineQueue;
     private final Thread serverThread;
     private final Duration sendTimeout;
+    private final Duration closeTimeout;
     private final Consumer<JsonObject> notificationHandler;
+    private final ReentrantLock sendLock = new ReentrantLock();
     private int nextId = 1;
 
     private McpStdioClient(final PrintWriter writer,
                            final LineQueue lineQueue,
                            final Thread serverThread,
                            final Duration sendTimeout,
+                           final Duration closeTimeout,
                            final Consumer<JsonObject> notificationHandler) {
         this.writer = writer;
         this.lineQueue = lineQueue;
         this.serverThread = serverThread;
         this.sendTimeout = sendTimeout;
+        this.closeTimeout = closeTimeout;
         this.notificationHandler = notificationHandler;
     }
 
@@ -123,6 +130,13 @@ public final class McpStdioClient implements AutoCloseable {
     public static McpStdioClient of(final McpServer server,
                                     final Duration sendTimeout,
                                     final Consumer<JsonObject> notificationHandler) {
+        return of(server, sendTimeout, notificationHandler, DEFAULT_CLOSE_TIMEOUT);
+    }
+
+    static McpStdioClient of(final McpServer server,
+                             final Duration sendTimeout,
+                             final Consumer<JsonObject> notificationHandler,
+                             final Duration closeTimeout) {
         try {
             final var clientToServer = new PipedOutputStream();
             final var serverIn = new PipedInputStream(clientToServer);
@@ -136,6 +150,7 @@ public final class McpStdioClient implements AutoCloseable {
                 lineQueue,
                 thread,
                 sendTimeout,
+                closeTimeout,
                 notificationHandler
             );
         } catch (final IOException e) {
@@ -161,14 +176,19 @@ public final class McpStdioClient implements AutoCloseable {
      * Skips any server-pushed notifications (no {@code id} field) that arrive before
      * the matching response. Throws if no response arrives within the send timeout.
      *
+     * <p>Safe for concurrent callers: requests are serialized, so each caller reads only
+     * its own response. The send timeout applies once a request has been written, not to
+     * the time spent waiting for earlier requests.
+     *
      * @param method the JSON-RPC method name
      * @param params the parameters
      * @return the full response envelope
      */
     public JsonObject send(final String method, final Map<String, Object> params) {
-        final int sentId = nextId++;
-        writer.println(rpc(method, sentId, params));
+        sendLock.lock();
         try {
+            final int sentId = nextId++;
+            writer.println(rpc(method, sentId, params));
             while (true) {
                 final var line = lineQueue.poll(sendTimeout);
                 if (line == null) {
@@ -187,19 +207,31 @@ public final class McpStdioClient implements AutoCloseable {
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new UncheckedIOException(new IOException("Interrupted waiting for server response", e));
+        } finally {
+            sendLock.unlock();
         }
     }
 
     /**
      * Closes the client, signals EOF to the server, and waits for its stdio loop to exit.
+     *
+     * @throws IllegalStateException if the stdio loop is still running after the close timeout
+     *                               (for example, because a tool call is stuck); the loop thread
+     *                               is interrupted before the exception is thrown
      */
     @Override
     public void close() {
         writer.close();
         try {
-            serverThread.join(5_000);
+            serverThread.join(closeTimeout);
         } catch (final InterruptedException e) {
+            serverThread.interrupt();
             Thread.currentThread().interrupt();
+            return;
+        }
+        if (serverThread.isAlive()) {
+            serverThread.interrupt();
+            throw new IllegalStateException("MCP stdio loop did not exit within " + closeTimeout);
         }
     }
 
@@ -266,15 +298,15 @@ public final class McpStdioClient implements AutoCloseable {
     private static final class LineQueue extends OutputStream {
 
         private final LinkedBlockingQueue<String> lines = new LinkedBlockingQueue<>();
-        private final StringBuilder current = new StringBuilder();
+        private final ByteArrayOutputStream current = new ByteArrayOutputStream();
 
         @Override
         public void write(final int b) {
             if (b == '\n') {
-                lines.offer(current.toString());
-                current.setLength(0);
+                lines.offer(current.toString(StandardCharsets.UTF_8));
+                current.reset();
             } else if (b != '\r') {
-                current.append((char) b);
+                current.write(b);
             }
         }
 

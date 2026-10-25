@@ -61,8 +61,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.Phaser;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -83,7 +84,8 @@ public final class McpServer {
 
     /**
      * ScopedValue bound to the current MCP session ID for the duration of each tool call.
-     * Absent for tool calls made without a session header (e.g. local single-user use).
+     * Bound to {@code "local"} for stdio and to {@code "anonymous"} for HTTP requests made
+     * without a session header.
      */
     public static final ScopedValue<String> SESSION_ID = ScopedValue.newInstance();
 
@@ -93,6 +95,14 @@ public final class McpServer {
      * {@link ScopedValue#isBound()} before calling the reporter.
      */
     public static final ScopedValue<ProgressReporter> PROGRESS_REPORTER = ScopedValue.newInstance();
+
+    /**
+     * Session id bound to HTTP requests that carry no {@code Mcp-Session-Id} header. Distinct
+     * from the stdio session id ({@code "local"}) so a header-less HTTP caller can never reach
+     * the stdio session's subscriptions or notification stream. Real session ids are UUIDs, so
+     * it cannot collide with a registered session.
+     */
+    private static final String ANONYMOUS_SESSION = "anonymous";
 
     private final McpServerInfo info;
     private final String instructions;
@@ -104,6 +114,7 @@ public final class McpServer {
     private final Set<String> allowedHosts;
     private final int maxSessions;
     private final int maxSubscriptionsPerSession;
+    private final int maxBatchSize;
     private final TelemetryRecorder recorder;
     private final SubscriberRegistry<ToolCallEvent> toolCallEvents = new SubscriberRegistry<>();
     private final ConcurrentHashMap<String, SessionState> sessions = new ConcurrentHashMap<>();
@@ -118,6 +129,7 @@ public final class McpServer {
         this.allowedHosts = Set.copyOf(builder.allowedHosts);
         this.maxSessions = builder.maxSessions;
         this.maxSubscriptionsPerSession = builder.maxSubscriptionsPerSession;
+        this.maxBatchSize = builder.maxBatchSize;
         this.recorder = builder.recorder;
 
         startSessionReaper(builder.sessionIdleTimeout);
@@ -157,9 +169,25 @@ public final class McpServer {
                     break;
                 }
                 final var cutoff = Instant.now().minus(idleTimeout);
-                sessions.entrySet().removeIf(entry -> entry.getValue().lastAccessed.isBefore(cutoff));
+                for (final var entry : sessions.entrySet()) {
+                    if (entry.getValue().lastAccessed.isBefore(cutoff)
+                        && sessions.remove(entry.getKey(), entry.getValue())) {
+                        closeEmitter(entry.getValue());
+                    }
+                }
             }
         });
+    }
+
+    /**
+     * Closes the session's SSE stream, if one is open, so its parked virtual thread and socket
+     * are released when the session is evicted or deleted.
+     */
+    private static void closeEmitter(final SessionState state) {
+        final var emitter = state.emitter.getAndSet(null);
+        if (emitter != null) {
+            emitter.close();
+        }
     }
 
     private static final class SessionState {
@@ -215,7 +243,10 @@ public final class McpServer {
             if ("DELETE".equalsIgnoreCase(method)) {
                 final var sid = exchange.request().header("Mcp-Session-Id");
                 if (sid.isPresent()) {
-                    sessions.remove(sid.get());
+                    final var removed = sessions.remove(sid.get());
+                    if (removed != null) {
+                        closeEmitter(removed);
+                    }
                 }
                 exchange.response().status(200).send("");
                 return;
@@ -242,7 +273,7 @@ public final class McpServer {
                     exchange.response().status(404).send("Session not found");
                     return;
                 }
-                final var maybeResponse = dispatchBatch(batch, sessionId.orElse("local"));
+                final var maybeResponse = dispatchBatch(batch, sessionId.orElse(ANONYMOUS_SESSION));
                 if (maybeResponse.isEmpty()) {
                     exchange.response().status(202).send("");
                     return;
@@ -271,7 +302,7 @@ public final class McpServer {
                 return;
             }
 
-            final var maybeResponse = dispatch(request, sessionId.orElse("local"));
+            final var maybeResponse = dispatch(request, sessionId.orElse(ANONYMOUS_SESSION));
 
             if (maybeResponse.isEmpty()) {
                 exchange.response().status(202).send("");
@@ -337,36 +368,33 @@ public final class McpServer {
             }
         });
         final var reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
-        final var phaser = new Phaser(1);
         try {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                if (line.isBlank()) {
-                    continue;
-                }
-                final var captured = line;
-                phaser.register();
-                Thread.ofVirtual().start(() -> {
-                    try {
-                        final var parsed = Json.parse(captured);
-                        if (parsed instanceof JsonArray batch) {
-                            dispatchBatch(batch, "local")
-                                .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
-                        } else {
-                            dispatch(parsed.asObject(), "local")
-                                .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
-                        }
-                    } catch (final RuntimeException e) {
-                        recorder.warn("Discarding malformed stdio line: %s", e.getMessage());
-                    } finally {
-                        phaser.arriveAndDeregister();
+            // closing the executor waits for every in-flight dispatch, on EOF or on error
+            try (var dispatcher = Executors.newVirtualThreadPerTaskExecutor()) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isBlank()) {
+                        continue;
                     }
-                });
+                    final var captured = line;
+                    dispatcher.execute(() -> {
+                        try {
+                            final var parsed = Json.parse(captured);
+                            if (parsed instanceof JsonArray batch) {
+                                dispatchBatch(batch, "local")
+                                    .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
+                            } else {
+                                dispatch(parsed.asObject(), "local")
+                                    .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
+                            }
+                        } catch (final RuntimeException e) {
+                            recorder.warn("Discarding malformed stdio line: %s", e.getMessage());
+                        }
+                    });
+                }
             }
-            phaser.arriveAndAwaitAdvance();
             recorder.info("stdio session ended (clean EOF)");
         } catch (final IOException e) {
-            phaser.arriveAndAwaitAdvance();
             recorder.warn("stdio session ended unexpectedly: %s", e.getMessage());
         } finally {
             stdioOutputQueue = null;
@@ -443,23 +471,32 @@ public final class McpServer {
         if (batch.values().isEmpty()) {
             return Optional.of(errorEnvelope(JsonNull.INSTANCE, -32600, "Invalid Request: empty batch"));
         }
+        if (batch.values().size() > maxBatchSize) {
+            return Optional.of(errorEnvelope(JsonNull.INSTANCE, -32600,
+                "Invalid Request: batch exceeds " + maxBatchSize + " requests"));
+        }
         final var responses = new ConcurrentLinkedQueue<JsonObject>();
-        final var batchPhaser = new Phaser(1);
+        final var remaining = new CountDownLatch(batch.values().size());
         for (final var item : batch.values()) {
             if (!(item instanceof JsonObject req)) {
                 responses.add(errorEnvelope(JsonNull.INSTANCE, -32600, "Invalid Request"));
+                remaining.countDown();
                 continue;
             }
-            batchPhaser.register();
             Thread.ofVirtual().start(() -> {
                 try {
                     dispatch(req, sessionId).ifPresent(responses::add);
                 } finally {
-                    batchPhaser.arriveAndDeregister();
+                    remaining.countDown();
                 }
             });
         }
-        batchPhaser.arriveAndAwaitAdvance();
+        try {
+            remaining.await();
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.of(errorEnvelope(JsonNull.INSTANCE, -32603, "Internal error: batch interrupted"));
+        }
         if (responses.isEmpty()) {
             return Optional.empty();
         }
@@ -705,6 +742,10 @@ public final class McpServer {
             final var prev = state.emitter.getAndSet(emitter);
             if (prev != null) {
                 prev.close();
+            }
+            if (sessions.get(sessionId) != state) {
+                // the session was evicted or deleted while this stream was connecting
+                closeEmitter(state);
             }
             try {
                 emitter.awaitClose();
@@ -1185,6 +1226,7 @@ public final class McpServer {
         private final HashSet<String> allowedHosts = new HashSet<>();
         private int maxSessions = 10_000;
         private int maxSubscriptionsPerSession = 1_000;
+        private int maxBatchSize = 1_000;
         private Duration sessionIdleTimeout = Duration.ofHours(1);
         private TelemetryRecorder recorder;
         private boolean logToolCalls = false;
@@ -1353,6 +1395,21 @@ public final class McpServer {
                 throw new IllegalArgumentException("maxSubscriptionsPerSession must be positive");
             }
             this.maxSubscriptionsPerSession = max;
+            return this;
+        }
+
+        /**
+         * Sets the maximum number of requests accepted in one JSON-RPC batch (default 1,000).
+         * Larger batches are rejected with a single {@code -32600} Invalid Request error.
+         *
+         * @param max the cap; must be positive
+         * @return this builder
+         */
+        public Builder maxBatchSize(final int max) {
+            if (max <= 0) {
+                throw new IllegalArgumentException("maxBatchSize must be positive");
+            }
+            this.maxBatchSize = max;
             return this;
         }
 
