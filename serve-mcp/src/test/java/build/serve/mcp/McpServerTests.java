@@ -28,6 +28,7 @@ import build.serve.testing.TestServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -35,9 +36,13 @@ import java.io.InputStreamReader;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -1027,6 +1032,114 @@ class McpServerTests {
                 assertThat(events).isEmpty();
             }
         }
+    }
+
+    @Test
+    void shouldCloseSseEmitterWhenIdleSessionIsEvicted() throws InterruptedException {
+        final var mcpServer = McpServer.builder("sse-server", "1.0.0")
+            .sessionIdleTimeout(Duration.ofMillis(200))
+            .build();
+        try (final var sseClient = McpTestClient.start(mcpServer)) {
+            sseClient.initialize();
+
+            try (final var stream = sseClient.sseStream()) {
+                Thread.sleep(100); // let the stream establish on the server
+
+                // collectAll fails if the server never closes the stream
+                assertThat(stream.collectAll(Duration.ofSeconds(3))).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void shouldCloseSseEmitterWhenSessionIsDeleted() throws InterruptedException {
+        final var mcpServer = McpServer.builder("sse-server", "1.0.0").build();
+        try (final var sseClient = McpTestClient.start(mcpServer)) {
+            sseClient.initialize();
+
+            try (final var stream = sseClient.sseStream()) {
+                Thread.sleep(100); // let the stream establish on the server
+
+                sseClient.deleteSession().assertStatus(200);
+
+                assertThat(stream.collectAll(Duration.ofSeconds(3))).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void shouldReturnInvalidRequestForHttpBatchOverDefaultLimit() {
+        final var mcpServer = McpServer.builder("batch-server", "1.0.0").build();
+        try (final var testClient = McpTestClient.start(mcpServer)) {
+            final var response = testClient.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body(emptyBatch(70_000))
+                .send()
+                .assertStatus(200);
+
+            final var error = Json.parse(response.body()).asObject().get("error").asObject();
+            assertThat(error.get("code").asNumber().toNumber().intValue()).isEqualTo(-32600);
+        }
+    }
+
+    @Test
+    void shouldReturnInvalidRequestForHttpBatchOverConfiguredLimit() {
+        final var mcpServer = McpServer.builder("batch-server", "1.0.0").maxBatchSize(2).build();
+        try (final var testClient = McpTestClient.start(mcpServer)) {
+            testClient.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},"
+                    + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}]")
+                .send()
+                .assertStatus(200);
+
+            final var response = testClient.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},"
+                    + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"},"
+                    + "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}]")
+                .send();
+
+            final var error = Json.parse(response.body()).asObject().get("error").asObject();
+            assertThat(error.get("code").asNumber().toNumber().intValue()).isEqualTo(-32600);
+        }
+    }
+
+    @Test
+    @Timeout(60)
+    void shouldHandleHttpBatchWithMoreConcurrentItemsThan65535WhenConfigured() {
+        final int size = 66_000;
+        final var started = new AtomicInteger();
+        final var gate = new CountDownLatch(1);
+        final var mcpServer = McpServer.builder("batch-server", "1.0.0")
+            .maxBatchSize(100_000)
+            .tool(ToolDef.of("hold", "Holds until every batch item is in flight")
+                .handle(args -> {
+                    if (started.incrementAndGet() >= size) {
+                        gate.countDown();
+                    }
+                    try {
+                        gate.await(15, TimeUnit.SECONDS);
+                    } catch (final InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return McpToolResult.text("ok");
+                }))
+            .build();
+        final var item = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hold\"}}";
+        try (final var testClient = McpTestClient.start(mcpServer)) {
+            final var response = testClient.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body("[" + String.join(",", Collections.nCopies(size, item)) + "]")
+                .send()
+                .assertStatus(200);
+
+            assertThat(Json.parse(response.body()).asArray().values()).hasSize(size);
+        }
+    }
+
+    private static String emptyBatch(final int size) {
+        return "[" + String.join(",", Collections.nCopies(size, "{}")) + "]";
     }
 
     @Test
