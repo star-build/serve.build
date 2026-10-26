@@ -55,7 +55,7 @@ class McpDualTransportTests {
                 .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/subscribe\","
                     + "\"params\":{\"uri\":\"test://data\"}}")
                 .send()
-                .assertStatus(200);
+                .assertStatus(400);
 
             server.notifyResourceChanged("test://data");
 
@@ -65,16 +65,29 @@ class McpDualTransportTests {
     }
 
     @Test
-    void shouldNotBindStdioSessionIdForSessionlessHttpToolCall() {
+    void shouldNotBindStdioSessionIdForHttpToolCall() {
         final var server = McpServer.builder("dual-server", "1.0.0")
             .tool(ToolDef.of("whoami", "Returns the bound session id")
                 .handle(args -> McpToolResult.text(McpServer.SESSION_ID.orElse("unbound"))))
             .build();
 
         try (var http = TestServer.of(RouterBuilder.create().route("/mcp", server.handler()).build())) {
-            final var response = http.post("/mcp")
+            http.post("/mcp")
                 .header("Content-Type", "application/json")
                 .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                    + "\"params\":{\"name\":\"whoami\",\"arguments\":{}}}")
+                .send()
+                .assertStatus(400);
+
+            final var initialize = http.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+                .send()
+                .assertStatus(200);
+            final var response = http.post("/mcp")
+                .header("Content-Type", "application/json")
+                .header("Mcp-Session-Id", initialize.header("Mcp-Session-Id"))
+                .body("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
                     + "\"params\":{\"name\":\"whoami\",\"arguments\":{}}}")
                 .send()
                 .assertStatus(200);

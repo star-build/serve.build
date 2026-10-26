@@ -67,6 +67,7 @@ class McpServerTests {
             .build();
 
         client = McpTestClient.start(mcpServer);
+        client.initialize();
     }
 
     @AfterEach
@@ -179,6 +180,7 @@ class McpServerTests {
     void notificationIgnoredTest() {
         client.post("/mcp")
             .header("Content-Type", "application/json")
+            .header("Mcp-Session-Id", client.sessionId)
             .body("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")
             .send()
             .assertStatus(202);
@@ -881,6 +883,7 @@ class McpServerTests {
     void shouldEchoStringIdInResponse() {
         final var response = client.post("/mcp")
             .header("Content-Type", "application/json")
+            .header("Mcp-Session-Id", client.sessionId)
             .body("{\"jsonrpc\":\"2.0\",\"id\":\"req-abc\",\"method\":\"ping\",\"params\":{}}")
             .send()
             .assertStatus(200);
@@ -1071,8 +1074,10 @@ class McpServerTests {
     void shouldReturnInvalidRequestForHttpBatchOverDefaultLimit() {
         final var mcpServer = McpServer.builder("batch-server", "1.0.0").build();
         try (final var testClient = McpTestClient.start(mcpServer)) {
+            testClient.initialize();
             final var response = testClient.post("/mcp")
                 .header("Content-Type", "application/json")
+                .header("Mcp-Session-Id", testClient.sessionId)
                 .body(emptyBatch(70_000))
                 .send()
                 .assertStatus(200);
@@ -1086,8 +1091,10 @@ class McpServerTests {
     void shouldReturnInvalidRequestForHttpBatchOverConfiguredLimit() {
         final var mcpServer = McpServer.builder("batch-server", "1.0.0").maxBatchSize(2).build();
         try (final var testClient = McpTestClient.start(mcpServer)) {
+            testClient.initialize();
             testClient.post("/mcp")
                 .header("Content-Type", "application/json")
+                .header("Mcp-Session-Id", testClient.sessionId)
                 .body("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},"
                     + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}]")
                 .send()
@@ -1095,6 +1102,7 @@ class McpServerTests {
 
             final var response = testClient.post("/mcp")
                 .header("Content-Type", "application/json")
+                .header("Mcp-Session-Id", testClient.sessionId)
                 .body("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},"
                     + "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"},"
                     + "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}]")
@@ -1128,8 +1136,10 @@ class McpServerTests {
             .build();
         final var item = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"hold\"}}";
         try (final var testClient = McpTestClient.start(mcpServer)) {
+            testClient.initialize();
             final var response = testClient.post("/mcp")
                 .header("Content-Type", "application/json")
+                .header("Mcp-Session-Id", testClient.sessionId)
                 .body("[" + String.join(",", Collections.nCopies(size, item)) + "]")
                 .send()
                 .assertStatus(200);
