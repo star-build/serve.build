@@ -6,6 +6,10 @@ import build.base.json.JsonNull;
 import build.base.json.JsonObject;
 import build.base.json.JsonString;
 import build.base.json.JsonValue;
+import build.base.telemetry.Telemetry;
+import build.base.telemetry.TelemetryRecorderFactory;
+import build.base.telemetry.Warning;
+import build.base.telemetry.foundation.AbstractTelemetryRecorder;
 import build.serve.foundation.routing.RouterBuilder;
 import build.serve.testing.TestResponse;
 import build.serve.testing.TestServer;
@@ -13,7 +17,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -251,6 +259,88 @@ class McpServerToolCallEventsTest {
         assertThat(failed.invocationId()).isEqualTo(received.get(0).invocationId());
         assertThat(failed.error()).isPresent();
         assertThat(failed.error().get()).isInstanceOf(AssertionError.class);
+    }
+
+    @Test
+    void shouldWarnWhenSubscriberThrowsAndStillServeTheCall() {
+        final var capturing = new CapturingTelemetryRecorder();
+        final var mcpServer = McpServer.builder("test", "1.0")
+            .recorder(capturing)
+            .tool(new EchoTool())
+            .build();
+        mcpServer.toolCallEvents().subscribe(event -> {
+            throw new IllegalStateException("subscriber boom");
+        });
+        server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
+
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hello\"}}}")
+            .assertStatus(200);
+
+        assertThat(capturing.warns()).hasSize(1);
+        assertThat(capturing.warns().getFirst())
+            .contains("tool-call event subscriber")
+            .contains("terminated");
+        assertThat(capturing.warnThrowables()).singleElement().satisfies(cause ->
+            assertThat(cause).isInstanceOf(IllegalStateException.class).hasMessage("subscriber boom"));
+    }
+
+    @Test
+    void shouldTerminateThrowingSubscriberWithoutAffectingOthers() {
+        final var capturing = new CapturingTelemetryRecorder();
+        final var mcpServer = McpServer.builder("test", "1.0")
+            .recorder(capturing)
+            .tool(new EchoTool())
+            .build();
+        final var throwingCalls = new AtomicInteger();
+        final var received = new CopyOnWriteArrayList<ToolCallEvent>();
+        mcpServer.toolCallEvents().subscribe(event -> {
+            throwingCalls.incrementAndGet();
+            throw new IllegalStateException("subscriber boom");
+        });
+        mcpServer.toolCallEvents().subscribe(received::add);
+        server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
+
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hello\"}}}")
+            .assertStatus(200);
+
+        // the STARTED event terminated the throwing subscriber, so it never saw SUCCEEDED
+        assertThat(throwingCalls.get()).isEqualTo(1);
+        assertThat(capturing.warns()).hasSize(1);
+        assertThat(received).hasSize(2);
+    }
+
+    private static final class CapturingTelemetryRecorder extends AbstractTelemetryRecorder {
+
+        private final List<Telemetry> captured = new CopyOnWriteArrayList<>();
+
+        CapturingTelemetryRecorder() {
+            super(URI.create("test://capture"));
+        }
+
+        @Override
+        protected <T extends Telemetry> T record(final T telemetry) {
+            captured.add(telemetry);
+            return telemetry;
+        }
+
+        @Override
+        public TelemetryRecorderFactory factory() {
+            return uri -> this;
+        }
+
+        List<String> warns() {
+            return captured.stream().filter(t -> t instanceof Warning).map(Object::toString).toList();
+        }
+
+        List<Throwable> warnThrowables() {
+            return captured.stream()
+                .filter(t -> t instanceof Warning)
+                .map(t -> ((Warning) t).throwable())
+                .flatMap(Optional::stream)
+                .toList();
+        }
     }
 
     private static final class EchoTool implements McpTool {

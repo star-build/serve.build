@@ -143,7 +143,10 @@ public final class McpServer implements AutoCloseable {
         this.inFlightRequests = new Semaphore(builder.maxConcurrentRequests);
         this.allowUnauthenticatedRemote = builder.allowUnauthenticatedRemote;
         this.recorder = builder.recorder;
-
+        // A subscriber that throws is terminated; without this the failure (and every later event the
+        // subscriber would have seen) vanishes without a trace.
+        this.toolCallEvents.onSubscriberError((subscriber, error) ->
+            recorder.warn(error, "tool-call event subscriber threw and was terminated"));
         this.sessionReaper = startSessionReaper(builder.sessionIdleTimeout);
 
         final var toolMap = new LinkedHashMap<String, McpTool>();
@@ -185,7 +188,12 @@ public final class McpServer implements AutoCloseable {
                 for (final var entry : sessions.entrySet()) {
                     if (entry.getValue().lastAccessed.isBefore(cutoff)
                         && sessions.remove(entry.getKey(), entry.getValue())) {
-                        closeEmitter(entry.getValue());
+                        // an uncaught failure here would end the reaper and leak every later session
+                        try {
+                            closeEmitter(entry.getValue());
+                        } catch (final RuntimeException e) {
+                            recorder.warn(e, "Failed to close the stream of idle session %s", entry.getKey());
+                        }
                     }
                 }
             }
@@ -519,9 +527,15 @@ public final class McpServer implements AutoCloseable {
         final var writerThread = Thread.ofVirtual().name("mcp-stdio-writer").start(() -> {
             final var pw = new PrintWriter(new OutputStreamWriter(out, StandardCharsets.UTF_8), true);
             try {
+                boolean failureReported = false;
                 Optional<String> item;
                 while ((item = queue.take()).isPresent()) {
                     pw.println(item.get());
+                    // PrintWriter swallows IOExceptions, so a closed output only shows up here
+                    if (pw.checkError() && !failureReported) {
+                        failureReported = true;
+                        recorder.warn("stdio output failed; responses are being dropped");
+                    }
                 }
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -545,7 +559,7 @@ public final class McpServer implements AutoCloseable {
                     try {
                         parsed = Json.parse(line);
                     } catch (final RuntimeException e) {
-                        recorder.warn("Discarding malformed stdio line: %s", e.getMessage());
+                        recorder.warn(e, "Discarding malformed stdio line");
                         continue;
                     }
                     final var permits = parsed instanceof JsonArray batch ? permitsFor(batch) : 1;
@@ -562,7 +576,11 @@ public final class McpServer implements AutoCloseable {
                                     .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
                             }
                         } catch (final RuntimeException e) {
-                            recorder.warn("Discarding malformed stdio line: %s", e.getMessage());
+                            recorder.warn(e, "Failed to dispatch stdio request");
+                            // answer the request rather than leave the client waiting
+                            if (parsed instanceof JsonObject request) {
+                                internalError(request).ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
+                            }
                         } catch (final Error e) {
                             // there is no connection to abort on stdio, so answer the request
                             // rather than leave the client waiting, then let the Error propagate
@@ -578,7 +596,7 @@ public final class McpServer implements AutoCloseable {
             }
             recorder.info("stdio session ended (clean EOF)");
         } catch (final IOException e) {
-            recorder.warn("stdio session ended unexpectedly: %s", e.getMessage());
+            recorder.warn(e, "stdio session ended unexpectedly");
         } finally {
             stdioOutputQueue = null;
             stdioSession = null;
@@ -986,7 +1004,7 @@ public final class McpServer implements AutoCloseable {
                     try {
                         emitter.send(SseEvent.of("message", json));
                     } catch (final IOException e) {
-                        recorder.warn("Failed to push notification for session %s: %s", sessionId, e.getMessage());
+                        recorder.warn(e, "Failed to push notification for session %s", sessionId);
                     }
                 }
             }
@@ -1046,7 +1064,7 @@ public final class McpServer implements AutoCloseable {
                     try {
                         emitter.send(event);
                     } catch (final IOException e) {
-                        recorder.warn("Failed to push resource notification for URI %s: %s", uri, e.getMessage());
+                        recorder.warn(e, "Failed to push resource notification for URI %s", uri);
                     }
                 }
             }
