@@ -38,6 +38,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.io.PipedInputStream;
 import java.io.PipedOutputStream;
 import java.io.PrintWriter;
@@ -46,6 +47,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -286,6 +288,67 @@ class McpStdioTests {
         tracingServer.stdioLoop(brokenStream, new ByteArrayOutputStream());
 
         assertThat(capturing.warns()).anyMatch(m -> m.contains("unexpectedly"));
+        assertThat(capturing.warnThrowables())
+            .anyMatch(t -> t instanceof IOException && "connection reset by peer".equals(t.getMessage()));
+    }
+
+    @Test
+    void shouldAnswerWithInternalErrorAndWarnWhenDispatchFails() {
+        final var capturing = new CapturingTelemetryRecorder();
+        final var failingServer = McpServer.builder("failing-server", "1.0.0")
+            .recorder(capturing)
+            .build();
+        capturing.failOnDiagnostic();
+
+        final var out = new ByteArrayOutputStream();
+        failingServer.stdioLoop(
+            toStream("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}}\n"),
+            out);
+
+        final var response = Json.parse(out.toString(StandardCharsets.UTF_8).strip()).asObject();
+        assertThat(response.get("error").asObject().get("code").asNumber().toNumber().intValue())
+            .isEqualTo(-32603);
+        assertThat(capturing.warns()).hasSize(1);
+        assertThat(capturing.warns().getFirst()).contains("Failed to dispatch stdio request");
+        assertThat(capturing.warnThrowables()).singleElement().satisfies(cause ->
+            assertThat(cause).isInstanceOf(IllegalStateException.class).hasMessage("diagnostic sink failed"));
+    }
+
+    @Test
+    void shouldWarnWithTheCauseWhenLineIsNotAnObject() {
+        final var capturing = new CapturingTelemetryRecorder();
+        final var tracingServer = McpServer.builder("tracing-server", "1.0.0")
+            .recorder(capturing)
+            .build();
+
+        tracingServer.stdioLoop(toStream("42\n"), new ByteArrayOutputStream());
+
+        assertThat(capturing.warns()).hasSize(1);
+        assertThat(capturing.warns().getFirst()).contains("Failed to dispatch stdio request");
+        assertThat(capturing.warnThrowables()).hasSize(1);
+    }
+
+    @Test
+    void shouldWarnOnceWhenStdioOutputFails() {
+        final var capturing = new CapturingTelemetryRecorder();
+        final var tracingServer = McpServer.builder("tracing-server", "1.0.0")
+            .recorder(capturing)
+            .build();
+        final var closedOutput = new OutputStream() {
+            @Override
+            public void write(final int b) throws IOException {
+                throw new IOException("broken pipe");
+            }
+        };
+        final var lines = String.join("\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{}}",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\",\"params\":{}}"
+        ) + "\n";
+
+        tracingServer.stdioLoop(toStream(lines), closedOutput);
+
+        assertThat(capturing.warns()).filteredOn(m -> m.contains("stdio output failed")).hasSize(1);
     }
 
     @Test
@@ -657,13 +720,24 @@ class McpStdioTests {
     private static final class CapturingTelemetryRecorder extends AbstractTelemetryRecorder {
 
         private final List<Telemetry> captured = new CopyOnWriteArrayList<>();
+        private volatile boolean failOnDiagnostic;
 
         CapturingTelemetryRecorder() {
             super(URI.create("test://capture"));
         }
 
+        /**
+         * Makes every later diagnostic throw, which fails request dispatch before it reaches a handler.
+         */
+        void failOnDiagnostic() {
+            failOnDiagnostic = true;
+        }
+
         @Override
         protected <T extends Telemetry> T record(final T telemetry) {
+            if (failOnDiagnostic && telemetry instanceof Diagnostic) {
+                throw new IllegalStateException("diagnostic sink failed");
+            }
             captured.add(telemetry);
             return telemetry;
         }
@@ -683,6 +757,14 @@ class McpStdioTests {
 
         List<String> warns() {
             return captured.stream().filter(t -> t instanceof Warning).map(Object::toString).toList();
+        }
+
+        List<Throwable> warnThrowables() {
+            return captured.stream()
+                .filter(t -> t instanceof Warning)
+                .map(t -> ((Warning) t).throwable())
+                .flatMap(Optional::stream)
+                .toList();
         }
     }
 }
