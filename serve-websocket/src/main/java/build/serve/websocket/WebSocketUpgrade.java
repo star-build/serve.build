@@ -191,6 +191,9 @@ public final class WebSocketUpgrade {
                 rawOut.write(response.getBytes(StandardCharsets.US_ASCII));
                 rawOut.flush();
 
+                // The connection is long-lived by design, so the request timeout must not interrupt it
+                exchange.attribute(Exchange.CANCEL_TIMEOUT_ATTRIBUTE, Runnable.class).ifPresent(Runnable::run);
+
                 // Run the read loop on this virtual thread (blocking)
                 wsConnection.readLoop();
             } finally {

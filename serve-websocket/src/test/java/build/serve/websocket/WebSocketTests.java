@@ -1,5 +1,6 @@
 package build.serve.websocket;
 
+import build.serve.foundation.option.RequestTimeout;
 import build.serve.foundation.routing.RouterBuilder;
 import build.serve.testing.TestServer;
 import org.junit.jupiter.api.Test;
@@ -8,6 +9,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.Socket;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.Map;
 import java.util.Set;
@@ -151,6 +153,27 @@ class WebSocketTests {
             .build());
              var ws = server.connectWebSocket("/ws")) {
             ws.sendText("hi");
+        }
+    }
+
+    /**
+     * A WebSocket is long-lived by design, so the transport's request timeout must stop applying once the
+     * upgrade completes; otherwise the connection is interrupted when the timeout elapses.
+     */
+    @Test
+    void shouldKeepConnectionOpenPastRequestTimeout() throws Exception {
+        try (var server = TestServer.of(RouterBuilder.create()
+            .route("/ws", WebSocketUpgrade.upgrade(ws -> ws.onText(msg -> {
+                try {
+                    ws.sendText("Echo: " + msg);
+                } catch (Exception e) {
+                    throw new RuntimeException(e);
+                }
+            }))).build(), RequestTimeout.of(Duration.ofMillis(300)));
+             var ws = server.connectWebSocket("/ws")) {
+            Thread.sleep(1_000);
+            ws.sendText("still here");
+            assertThat(ws.nextText()).isEqualTo("Echo: still here");
         }
     }
 

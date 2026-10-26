@@ -252,6 +252,7 @@ public interface ServerApplication
             this.shutdownHook = new Thread(this::stop, "serve-shutdown");
             Runtime.getRuntime().addShutdownHook(shutdownHook);
 
+            warnIfExposed(listenAddress);
             recorder.info("ServerApplication started on %s", transport.address());
 
             startFuture.complete(this);
@@ -296,9 +297,17 @@ public interface ServerApplication
             this.shutdownHook = new Thread(this::stop, "serve-shutdown");
             Runtime.getRuntime().addShutdownHook(shutdownHook);
 
+            warnIfExposed(listenAddress);
             recorder.info("ServerApplication started on %s (HTTPS)", transport.address());
 
             startFuture.complete(this);
+        }
+
+        private void warnIfExposed(final ListenAddress listenAddress) {
+            if (!listenAddress.isLoopback()) {
+                recorder.warn("Listening on %s, which is reachable from other hosts; "
+                    + "the default is %s", listenAddress.value(), ListenAddress.DEFAULT.value());
+            }
         }
 
         /**

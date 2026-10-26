@@ -20,7 +20,10 @@
 package build.serve.testing;
 
 import build.serve.foundation.Handler;
+import build.serve.foundation.error.DefaultErrorHandler;
 import build.serve.foundation.error.ErrorHandler;
+import build.serve.foundation.option.MaxRequestSize;
+import build.serve.foundation.option.RequestTimeout;
 import build.serve.foundation.routing.Router;
 import build.serve.foundation.routing.RouterBuilder;
 import build.serve.transport.http.HttpTransport;
@@ -58,10 +61,7 @@ public final class TestServer implements AutoCloseable {
      */
     public static TestServer of(final Handler handler) {
         try {
-            final var transport = new HttpTransport(
-                new InetSocketAddress("127.0.0.1", 0), 0, handler);
-            transport.start();
-            return new TestServer(transport.address().getPort(), () -> transport.stop(0));
+            return start(new HttpTransport(new InetSocketAddress("127.0.0.1", 0), 0, handler));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -96,13 +96,33 @@ public final class TestServer implements AutoCloseable {
      */
     public static TestServer of(final Handler handler, final ErrorHandler errorHandler) {
         try {
-            final var transport = new HttpTransport(
-                new InetSocketAddress("127.0.0.1", 0), 0, handler, errorHandler);
-            transport.start();
-            return new TestServer(transport.address().getPort(), () -> transport.stop(0));
+            return start(new HttpTransport(
+                new InetSocketAddress("127.0.0.1", 0), 0, handler, errorHandler));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /**
+     * Creates a test server from a {@link Handler} with a {@link RequestTimeout}.
+     *
+     * @param handler        the handler
+     * @param requestTimeout the maximum time a request handler may run
+     * @return a started test server
+     */
+    public static TestServer of(final Handler handler, final RequestTimeout requestTimeout) {
+        try {
+            return start(new HttpTransport(
+                new InetSocketAddress("127.0.0.1", 0), 0, handler, new DefaultErrorHandler(),
+                MaxRequestSize.DEFAULT, requestTimeout));
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static TestServer start(final HttpTransport transport) throws IOException {
+        transport.start();
+        return new TestServer(transport.address().getPort(), () -> transport.stop(0));
     }
 
     /**
