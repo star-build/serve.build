@@ -23,6 +23,9 @@ import build.base.json.Json;
 import build.base.json.JsonArray;
 import build.base.json.JsonObject;
 import build.base.json.JsonValue;
+import build.base.telemetry.Warning;
+import build.base.telemetry.foundation.ObservableTelemetryRecorder;
+import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.serve.foundation.routing.RouterBuilder;
 import build.serve.testing.TestServer;
 import org.junit.jupiter.api.AfterEach;
@@ -34,6 +37,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.Socket;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
@@ -748,6 +752,95 @@ class McpServerTests {
             .build())) {
 
             assertThat(rawPostWithHost(hostClient.port(), "127.0.0.1")).isEqualTo(403);
+        }
+    }
+
+    @Test
+    void shouldWarnOnceWhenDefaultHostCheckRefusesRequest() throws IOException {
+        final var recorder = ObservableTelemetryRecorder.of(
+            PrintStreamTelemetryRecorder.of(URI.create("serve://mcp/test"), System.err, System.err));
+        try (final var hostClient = McpTestClient.start(McpServer.builder("warn-host-server", "1.0.0")
+            .recorder(recorder)
+            .build())) {
+
+            assertThat(rawPostWithHost(hostClient.port(), "mcp.example.com")).isEqualTo(403);
+            assertThat(rawPostWithHost(hostClient.port(), "mcp.example.com")).isEqualTo(403);
+
+            assertThat(recorder.stream().filter(Warning.class::isInstance).count()).isEqualTo(1);
+        }
+    }
+
+    @Test
+    void shouldNotWarnWhenHostsAreRegistered() throws IOException {
+        final var recorder = ObservableTelemetryRecorder.of(
+            PrintStreamTelemetryRecorder.of(URI.create("serve://mcp/test"), System.err, System.err));
+        try (final var hostClient = McpTestClient.start(McpServer.builder("no-warn-host-server", "1.0.0")
+            .allowHost("mcp.example.com")
+            .recorder(recorder)
+            .build())) {
+
+            assertThat(rawPostWithHost(hostClient.port(), "attacker.example.com")).isEqualTo(403);
+
+            assertThat(recorder.hasObserved(Warning.class)).isFalse();
+        }
+    }
+
+    @Test
+    void shouldReplaceControlCharactersInUnknownResourceMessage() {
+        final var response = client.readResource("file:///a\r\nX-Injected: evil").asObject();
+        final var message = response.get("error").asObject().getString("message");
+        assertThat(message).doesNotContain("\r").doesNotContain("\n");
+        assertThat(message).contains("X-Injected: evil");
+    }
+
+    @Test
+    void shouldCloseSseEmitterAndEndSessionsWhenClosed() throws InterruptedException {
+        final var mcpServer = McpServer.builder("close-server", "1.0.0").build();
+        try (final var sseClient = McpTestClient.start(mcpServer)) {
+            sseClient.initialize();
+
+            try (final var stream = sseClient.sseStream()) {
+                Thread.sleep(100); // let the stream establish on the server
+
+                mcpServer.close();
+
+                assertThat(stream.collectAll(Duration.ofSeconds(3))).isEmpty();
+                sseClient.post("/mcp")
+                    .header("Content-Type", "application/json")
+                    .header("Mcp-Session-Id", sseClient.sessionId)
+                    .body("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}")
+                    .send()
+                    .assertStatus(404);
+            }
+        }
+    }
+
+    @Test
+    void shouldAllowCloseToBeCalledTwice() {
+        final var mcpServer = McpServer.builder("close-server", "1.0.0").build();
+        mcpServer.close();
+        mcpServer.close();
+    }
+
+    @Test
+    void shouldEvictIdleSessionWithVeryShortTimeout() throws InterruptedException {
+        final var mcp = McpServer.builder("s", "1")
+            .maxSessions(1)
+            .sessionIdleTimeout(Duration.ofMillis(1))
+            .build();
+        final var srv = TestServer.of(RouterBuilder.create().route("/mcp", mcp.handler()).build());
+        try (srv; mcp) {
+            srv.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+                .send().assertStatus(200);
+
+            Thread.sleep(300);
+
+            assertThat(srv.post("/mcp")
+                .header("Content-Type", "application/json")
+                .body("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{}}")
+                .send().status()).isEqualTo(200);
         }
     }
 
