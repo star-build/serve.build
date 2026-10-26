@@ -31,9 +31,12 @@ public interface SseEmitter extends AutoCloseable {
 
     /**
      * Sends a simple text data event.
+     * <p>
+     * Events are queued and written asynchronously, so a failed write is reported by a later call
+     * rather than by the call that queued the event, and queued events are lost when the client goes away.
      *
      * @param data the event data
-     * @throws IOException if the write fails
+     * @throws IOException if the emitter is closed, or the client is not reading and its buffer is full
      */
     void send(String data) throws IOException;
 
@@ -41,7 +44,8 @@ public interface SseEmitter extends AutoCloseable {
      * Sends a structured SSE event.
      *
      * @param event the event to send
-     * @throws IOException if the write fails
+     * @throws IOException if the emitter is closed, or the client is not reading and its buffer is full
+     * @see #send(String)
      */
     void send(SseEvent event) throws IOException;
 
@@ -59,6 +63,10 @@ public interface SseEmitter extends AutoCloseable {
      */
     void awaitClose() throws InterruptedException;
 
+    /**
+     * Closes this emitter after giving buffered events a bounded time to reach the client;
+     * events still queued after that are abandoned.
+     */
     @Override
     void close();
 }
