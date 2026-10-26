@@ -23,6 +23,8 @@ import build.base.json.JsonArray;
 import build.base.json.JsonObject;
 import build.base.json.JsonValue;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -128,13 +130,31 @@ public interface ToolParam<T> {
     static NumberParam<Integer> integer(final String name,
                                         final String description) {
         return new NumberParam<>(name, description, true, null,
-            val -> val.asNumber().toNumber().intValue(),
+            val -> exactInt(val.asNumber().toNumber()),
             JsonObject.builder()
                 .put("type", "integer")
                 .put("description", description)
                 .put("minimum", ParamBounds.DEFAULT_MIN_INTEGER)
                 .put("maximum", ParamBounds.DEFAULT_MAX_INTEGER)
                 .build());
+    }
+
+    /**
+     * Converts a JSON number to an {@code int}, rejecting a fractional value or one outside the {@code int} range
+     * instead of truncating or wrapping it, which would let an out-of-range value pass a bounds check.
+     */
+    private static int exactInt(final Number number) {
+        try {
+            return switch (number) {
+                case BigDecimal decimal -> decimal.intValueExact();
+                case BigInteger integer -> integer.intValueExact();
+                case Double decimal -> new BigDecimal(decimal).intValueExact();
+                case Float decimal -> new BigDecimal(decimal).intValueExact();
+                default -> Math.toIntExact(number.longValue());
+            };
+        } catch (final ArithmeticException | NumberFormatException e) {
+            throw new IllegalArgumentException("Value must be an integer within the 32-bit range.");
+        }
     }
 
     static BoolParam bool(final String name,

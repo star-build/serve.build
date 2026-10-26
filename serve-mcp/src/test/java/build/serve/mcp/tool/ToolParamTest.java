@@ -24,12 +24,14 @@ import build.base.json.JsonObject;
 import build.serve.mcp.McpToolResult;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class ToolParamTest {
 
@@ -828,5 +830,38 @@ class ToolParamTest {
         assertThatThrownBy(tool::inputSchema)
             .isInstanceOf(IllegalStateException.class)
             .hasMessageContaining("Node");
+    }
+
+    // --- Integer extraction ---
+
+    @Test
+    void shouldExtractIntegerWrittenWithDecimalPoint() {
+        assertThat(ToolParam.integer("n", "N").extract(Json.parse("{\"n\":5.0}"))).isEqualTo(5);
+    }
+
+    @Test
+    void shouldRejectIntegerBeyondIntRangeInsteadOfWrapping() {
+        final var param = ToolParam.integer("n", "N").min(1).max(100);
+
+        assertThatThrownBy(() -> param.extract(Json.parse("{\"n\":4294967297}")))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldRejectFractionalInteger() {
+        assertThatThrownBy(() -> ToolParam.integer("n", "N").extract(Json.parse("{\"n\":2.5}")))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void shouldRejectHugeExponentIntegerQuickly() {
+        final var param = ToolParam.integer("n", "N");
+
+        assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+            assertThatThrownBy(() -> param.extract(Json.parse("{\"n\":1e999999999}")))
+                .isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> param.extract(Json.parse("{\"n\":1e-999999999}")))
+                .isInstanceOf(IllegalArgumentException.class);
+        });
     }
 }

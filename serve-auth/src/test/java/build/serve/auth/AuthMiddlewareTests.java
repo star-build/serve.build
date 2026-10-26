@@ -142,6 +142,14 @@ class AuthMiddlewareTests {
     }
 
     @Test
+    void shouldAuthenticateBearerSchemeInAnyCase() {
+        var strategy = BearerTokenStrategy.of(t -> t.equals("secret") ? Optional.of(REED) : Optional.empty());
+
+        assertThat(strategy.authenticate(request("Authorization", "bearer secret"))).contains(REED);
+        assertThat(strategy.authenticate(request("Authorization", "BEARER secret"))).contains(REED);
+    }
+
+    @Test
     void shouldRejectInvalidBearerToken() {
         var strategy = BearerTokenStrategy.of(t -> Optional.empty());
 

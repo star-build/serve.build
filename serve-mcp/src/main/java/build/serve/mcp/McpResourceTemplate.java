@@ -28,7 +28,8 @@ import java.util.Optional;
  * <p>Templates use simple RFC 6570 variable expansion: {@code {varName}} matches any
  * non-slash segment; {@code {+varName}} matches any character sequence including slashes.
  * The full resolved URI is passed to {@link #read(String)} — variable extraction is left
- * to the implementation.
+ * to the implementation. A URI containing a {@code ..} path segment, literal or percent-encoded,
+ * matches no template.
  *
  * @author reed.vonredwitz
  * @since May-2026

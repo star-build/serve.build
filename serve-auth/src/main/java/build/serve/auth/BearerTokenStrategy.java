@@ -62,7 +62,7 @@ public final class BearerTokenStrategy implements AuthStrategy {
     @Override
     public Optional<Principal> authenticate(final Request request) {
         return request.header("Authorization")
-            .filter(h -> h.startsWith(PREFIX))
+            .filter(h -> h.regionMatches(true, 0, PREFIX, 0, PREFIX.length()))
             .map(h -> h.substring(PREFIX.length()))
             .flatMap(validator);
     }

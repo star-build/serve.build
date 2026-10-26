@@ -30,6 +30,9 @@ import java.util.Optional;
  * An event published on each MCP tool invocation — once before the call (STARTED) and once
  * after it completes (SUCCEEDED or FAILED).
  *
+ * <p>The {@code arguments} and {@code result} are the raw payloads and can hold secrets or file contents.
+ * {@link #toString()} omits them; a subscriber that writes them anywhere must redact them first.
+ *
  * <p>Subscribers attached via {@link build.base.flow.Publisher#subscribe} on
  * {@link McpServer#toolCallEvents()} receive two events per tool call. Both events carry the
  * same {@link #invocationId()}, allowing subscribers to correlate start and completion even
@@ -56,6 +59,23 @@ public record ToolCallEvent(long invocationId,
                             Optional<McpToolResult> result,
                             Optional<Duration> duration,
                             Optional<Throwable> error) {
+
+    /**
+     * Describes the call without its {@link #arguments()} or {@link #result()}, which can hold secrets or
+     * file contents. A subscriber that logs the event therefore does not write them out by accident.
+     *
+     * @return the event's identity, phase, tool and outcome
+     */
+    @Override
+    public String toString() {
+        return "ToolCallEvent[invocationId=" + invocationId
+            + ", phase=" + phase
+            + ", timestamp=" + timestamp
+            + ", sessionId=" + sessionId
+            + ", toolName=" + toolName
+            + ", duration=" + duration
+            + ", error=" + error.map(Throwable::toString).orElse("none") + "]";
+    }
 
     /**
      * Lifecycle phase of a {@link ToolCallEvent}.

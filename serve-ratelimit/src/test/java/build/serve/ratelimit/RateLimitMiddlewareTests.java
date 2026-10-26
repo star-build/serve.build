@@ -291,7 +291,7 @@ class RateLimitMiddlewareTests {
         }
     }
 
-    private static final class StubRequest implements Request {
+    static final class StubRequest implements Request {
 
         private final Map<String, String> headers;
         private final InetSocketAddress remoteAddress;
@@ -362,7 +362,7 @@ class RateLimitMiddlewareTests {
         }
     }
 
-    private static final class StubResponse implements Response {
+    static final class StubResponse implements Response {
 
         final Map<String, String> headers = new LinkedHashMap<>();
         int statusCode = 200;
