@@ -23,6 +23,7 @@ import build.base.json.Json;
 import build.base.json.JsonObject;
 import build.base.json.JsonValue;
 import build.serve.foundation.routing.RouterBuilder;
+import build.serve.mcp.tool.ToolDef;
 import build.serve.testing.TestServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;

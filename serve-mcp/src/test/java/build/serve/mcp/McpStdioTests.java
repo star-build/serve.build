@@ -29,6 +29,8 @@ import build.base.telemetry.Telemetry;
 import build.base.telemetry.TelemetryRecorderFactory;
 import build.base.telemetry.Warning;
 import build.base.telemetry.foundation.AbstractTelemetryRecorder;
+import build.serve.mcp.tool.ToolDef;
+import build.serve.mcp.tool.ToolParam;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

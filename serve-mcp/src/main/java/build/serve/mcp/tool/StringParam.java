@@ -17,7 +17,7 @@
  * limitations under the License.
  * #L%
  */
-package build.serve.mcp;
+package build.serve.mcp.tool;
 
 import build.base.json.JsonArray;
 import build.base.json.JsonObject;
