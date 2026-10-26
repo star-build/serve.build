@@ -72,6 +72,7 @@ final class McpTestClient implements AutoCloseable {
      * full JSON-RPC response for assertion.
      */
     JsonValue initialize() {
+        sessionId = null; // initialize must not carry a session; a repeat call starts a fresh one
         final var response = postRaw(rpc("initialize", nextId++, Map.of()));
         sessionId = response.header("Mcp-Session-Id");
         return Json.parse(response.body());

@@ -7,6 +7,7 @@ import build.base.json.JsonObject;
 import build.base.json.JsonString;
 import build.base.json.JsonValue;
 import build.serve.foundation.routing.RouterBuilder;
+import build.serve.testing.TestResponse;
 import build.serve.testing.TestServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -32,6 +33,21 @@ class McpServerToolCallEventsTest {
         }
     }
 
+    /**
+     * Initializes a fresh session, then posts {@code body} on it.
+     */
+    private TestResponse postInSession(final String body) {
+        final var initialize = server.post("/mcp")
+            .header("Content-Type", "application/json")
+            .body("{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
+            .send();
+        return server.post("/mcp")
+            .header("Content-Type", "application/json")
+            .header("Mcp-Session-Id", initialize.header("Mcp-Session-Id"))
+            .body(body)
+            .send();
+    }
+
     @Test
     void shouldPublishStartedThenSucceededEventsOnSuccessfulInvocation() {
         final var mcpServer = McpServer.builder("test", "1.0")
@@ -41,11 +57,8 @@ class McpServerToolCallEventsTest {
         mcpServer.toolCallEvents().subscribe(received::add);
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
-        server.post("/mcp")
-            .header("Content-Type", "application/json")
-            .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
-                + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hello\"}}}")
-            .send()
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"hello\"}}}")
             .assertStatus(200);
 
         assertThat(received).hasSize(2);
@@ -79,11 +92,8 @@ class McpServerToolCallEventsTest {
         mcpServer.toolCallEvents().subscribe(received::add);
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
-        server.post("/mcp")
-            .header("Content-Type", "application/json")
-            .body("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
-                + "\"params\":{\"name\":\"thrower\",\"arguments\":{}}}")
-            .send()
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"thrower\",\"arguments\":{}}}")
             .assertStatus(200);
 
         assertThat(received).hasSize(2);
@@ -109,11 +119,8 @@ class McpServerToolCallEventsTest {
             .build();
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
-        final var response = server.post("/mcp")
-            .header("Content-Type", "application/json")
-            .body("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
-                + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"world\"}}}")
-            .send()
+        final var response = postInSession("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"world\"}}}")
             .assertStatus(200);
 
         final var json = Json.parse(response.body()).asObject();
@@ -131,11 +138,8 @@ class McpServerToolCallEventsTest {
         mcpServer.toolCallEvents().subscribe(received::add);
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
-        server.post("/mcp")
-            .header("Content-Type", "application/json")
-            .body("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
-                + "\"params\":{\"name\":\"no-such-tool\",\"arguments\":{}}}")
-            .send()
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"no-such-tool\",\"arguments\":{}}}")
             .assertStatus(200);
 
         assertThat(received).isEmpty();
@@ -160,7 +164,7 @@ class McpServerToolCallEventsTest {
     }
 
     @Test
-    void shouldUseAnonymousSessionIdWhenNoSessionHeader() {
+    void shouldNotDispatchToolCallWhenNoSessionHeader() {
         final var mcpServer = McpServer.builder("test", "1.0")
             .tool(new EchoTool())
             .build();
@@ -173,11 +177,9 @@ class McpServerToolCallEventsTest {
             .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
                 + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"no-session\"}}}")
             .send()
-            .assertStatus(200);
+            .assertStatus(400);
 
-        assertThat(received).hasSize(2);
-        assertThat(received.get(0).sessionId()).isEqualTo("anonymous");
-        assertThat(received.get(1).sessionId()).isEqualTo("anonymous");
+        assertThat(received).isEmpty();
     }
 
     @Test
@@ -191,11 +193,8 @@ class McpServerToolCallEventsTest {
         mcpServer.toolCallEvents().subscribe(second::add);
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
-        server.post("/mcp")
-            .header("Content-Type", "application/json")
-            .body("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
-                + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"fan-out\"}}}")
-            .send()
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"fan-out\"}}}")
             .assertStatus(200);
 
         assertThat(first).hasSize(2);
@@ -215,11 +214,8 @@ class McpServerToolCallEventsTest {
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
         for (int i = 0; i < 2; i++) {
-            server.post("/mcp")
-                .header("Content-Type", "application/json")
-                .body("{\"jsonrpc\":\"2.0\",\"id\":" + i + ",\"method\":\"tools/call\","
-                    + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"x\"}}}")
-                .send()
+            postInSession("{\"jsonrpc\":\"2.0\",\"id\":" + i + ",\"method\":\"tools/call\","
+                + "\"params\":{\"name\":\"echo\",\"arguments\":{\"text\":\"x\"}}}")
                 .assertStatus(200);
         }
 
@@ -240,11 +236,8 @@ class McpServerToolCallEventsTest {
         mcpServer.toolCallEvents().subscribe(received::add);
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
-        server.post("/mcp")
-            .header("Content-Type", "application/json")
-            .body("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
-                + "\"params\":{\"name\":\"error-thrower\",\"arguments\":{}}}")
-            .send()
+        postInSession("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\","
+            + "\"params\":{\"name\":\"error-thrower\",\"arguments\":{}}}")
             .assertStatus(200);
 
         assertThat(received).hasSize(2);

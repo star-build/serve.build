@@ -33,6 +33,7 @@ import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.base.telemetry.foundation.SystemTelemetryRecorder;
 import build.serve.foundation.Exchange;
 import build.serve.foundation.Handler;
+import build.serve.foundation.context.RequestContext;
 import build.serve.sse.SseEmitter;
 import build.serve.sse.SseEvent;
 import build.serve.sse.SseUpgrade;
@@ -84,8 +85,9 @@ public final class McpServer {
 
     /**
      * ScopedValue bound to the current MCP session ID for the duration of each tool call.
-     * Bound to {@code "local"} for stdio and to {@code "anonymous"} for HTTP requests made
-     * without a session header.
+     * Bound to {@code "local"} for stdio. For HTTP it is bound to the session id issued at
+     * {@code initialize}; requests without a session are rejected, so it is never a value shared
+     * between callers.
      */
     public static final ScopedValue<String> SESSION_ID = ScopedValue.newInstance();
 
@@ -95,14 +97,6 @@ public final class McpServer {
      * {@link ScopedValue#isBound()} before calling the reporter.
      */
     public static final ScopedValue<ProgressReporter> PROGRESS_REPORTER = ScopedValue.newInstance();
-
-    /**
-     * Session id bound to HTTP requests that carry no {@code Mcp-Session-Id} header. Distinct
-     * from the stdio session id ({@code "local"}) so a header-less HTTP caller can never reach
-     * the stdio session's subscriptions or notification stream. Real session ids are UUIDs, so
-     * it cannot collide with a registered session.
-     */
-    private static final String ANONYMOUS_SESSION = "anonymous";
 
     private final McpServerInfo info;
     private final String instructions;
@@ -115,6 +109,7 @@ public final class McpServer {
     private final int maxSessions;
     private final int maxSubscriptionsPerSession;
     private final int maxBatchSize;
+    private final boolean allowUnauthenticatedRemote;
     private final TelemetryRecorder recorder;
     private final SubscriberRegistry<ToolCallEvent> toolCallEvents = new SubscriberRegistry<>();
     private final ConcurrentHashMap<String, SessionState> sessions = new ConcurrentHashMap<>();
@@ -130,6 +125,7 @@ public final class McpServer {
         this.maxSessions = builder.maxSessions;
         this.maxSubscriptionsPerSession = builder.maxSubscriptionsPerSession;
         this.maxBatchSize = builder.maxBatchSize;
+        this.allowUnauthenticatedRemote = builder.allowUnauthenticatedRemote;
         this.recorder = builder.recorder;
 
         startSessionReaper(builder.sessionIdleTimeout);
@@ -191,14 +187,57 @@ public final class McpServer {
     }
 
     private static final class SessionState {
+        /**
+         * The principal that initialized the session, or {@code null} if it was unauthenticated.
+         */
+        final Object principal;
         final Set<String> subscriptions = ConcurrentHashMap.newKeySet();
         final AtomicReference<SseEmitter> emitter = new AtomicReference<>();
         volatile Instant lastAccessed = Instant.now();
         volatile McpLogLevel logLevel;
+
+        SessionState(final Object principal) {
+            this.principal = principal;
+        }
     }
 
     private SessionState stateFor(final String sessionId) {
+        if (sessionId == null) {
+            return null;
+        }
         return "local".equals(sessionId) ? stdioSession : sessions.get(sessionId);
+    }
+
+    private static Object currentPrincipal() {
+        return RequestContext.PRINCIPAL.isBound() ? RequestContext.PRINCIPAL.get() : null;
+    }
+
+    /**
+     * Looks up an HTTP session, treating a session owned by a different principal as absent so
+     * that a session id alone is never enough to use someone else's session. Principals are
+     * compared with {@link Object#equals}, so an authentication layer must bind principals that
+     * are equal across requests from the same caller (e.g. records).
+     * <p>
+     * When no principal is bound, as on a server using {@link Builder#allowUnauthenticatedRemote()},
+     * every session is owned by {@code null} and the unguessable session id is the only protection.
+     */
+    private SessionState ownedSession(final String sessionId) {
+        final var state = sessions.get(sessionId);
+        return state != null && Objects.equals(state.principal, currentPrincipal()) ? state : null;
+    }
+
+    /**
+     * Fail-closed: a peer that is not on loopback must have been authenticated by a layer in front
+     * of this handler unless {@link Builder#allowUnauthenticatedRemote()} was called. A transport
+     * that cannot report a peer address is not restricted.
+     */
+    private boolean isRemoteAccessAllowed(final Exchange exchange) {
+        if (allowUnauthenticatedRemote || RequestContext.PRINCIPAL.isBound()) {
+            return true;
+        }
+        return exchange.request().remoteAddress()
+            .map(address -> address.getAddress() != null && address.getAddress().isLoopbackAddress())
+            .orElse(true);
     }
 
     private record TemplateEntry(McpResourceTemplate template, Pattern pattern) {
@@ -233,6 +272,11 @@ public final class McpServer {
                 return;
             }
 
+            if (!isRemoteAccessAllowed(exchange)) {
+                exchange.response().status(401).send("Authentication required");
+                return;
+            }
+
             final var method = exchange.request().method();
 
             if ("GET".equalsIgnoreCase(method)) {
@@ -243,9 +287,9 @@ public final class McpServer {
             if ("DELETE".equalsIgnoreCase(method)) {
                 final var sid = exchange.request().header("Mcp-Session-Id");
                 if (sid.isPresent()) {
-                    final var removed = sessions.remove(sid.get());
-                    if (removed != null) {
-                        closeEmitter(removed);
+                    final var owned = ownedSession(sid.get());
+                    if (owned != null && sessions.remove(sid.get(), owned)) {
+                        closeEmitter(owned);
                     }
                 }
                 exchange.response().status(200).send("");
@@ -269,11 +313,15 @@ public final class McpServer {
             final var parsed = Json.parse(body);
 
             if (parsed instanceof JsonArray batch) {
-                if (sessionId.isPresent() && !sessions.containsKey(sessionId.get())) {
+                if (sessionId.isEmpty()) {
+                    exchange.response().status(400).send("Mcp-Session-Id header required");
+                    return;
+                }
+                if (ownedSession(sessionId.get()) == null) {
                     exchange.response().status(404).send("Session not found");
                     return;
                 }
-                final var maybeResponse = dispatchBatch(batch, sessionId.orElse(ANONYMOUS_SESSION));
+                final var maybeResponse = dispatchBatch(batch, sessionId.get());
                 if (maybeResponse.isEmpty()) {
                     exchange.response().status(202).send("");
                     return;
@@ -292,7 +340,12 @@ public final class McpServer {
                 return;
             }
 
-            if (sessionId.isPresent() && !sessions.containsKey(sessionId.get())) {
+            if (!isInitialize && sessionId.isEmpty()) {
+                exchange.response().status(400).send("Mcp-Session-Id header required");
+                return;
+            }
+
+            if (sessionId.isPresent() && ownedSession(sessionId.get()) == null) {
                 exchange.response().status(404).send("Session not found");
                 return;
             }
@@ -302,7 +355,7 @@ public final class McpServer {
                 return;
             }
 
-            final var maybeResponse = dispatch(request, sessionId.orElse(ANONYMOUS_SESSION));
+            final var maybeResponse = dispatch(request, sessionId.orElse(null));
 
             if (maybeResponse.isEmpty()) {
                 exchange.response().status(202).send("");
@@ -311,7 +364,7 @@ public final class McpServer {
 
             if (isInitialize) {
                 final var newSessionId = UUID.randomUUID().toString();
-                sessions.put(newSessionId, new SessionState());
+                sessions.put(newSessionId, new SessionState(currentPrincipal()));
                 exchange.response().header("Mcp-Session-Id", newSessionId);
             }
 
@@ -351,7 +404,7 @@ public final class McpServer {
      */
     public void stdioLoop(final InputStream in,
                           final OutputStream out) {
-        stdioSession = new SessionState();
+        stdioSession = new SessionState(null);
         final var queue = new LinkedBlockingQueue<Optional<String>>();
         stdioOutputQueue = queue;
         // Single writer thread owns all writes to `out`; dispatch threads enqueue responses.
@@ -732,7 +785,7 @@ public final class McpServer {
             exchange.response().status(400).send("Mcp-Session-Id header required");
             return;
         }
-        final var state = sessions.get(sessionId);
+        final var state = ownedSession(sessionId);
         if (state == null) {
             exchange.response().status(404).send("Session not found");
             return;
@@ -1230,6 +1283,7 @@ public final class McpServer {
         private Duration sessionIdleTimeout = Duration.ofHours(1);
         private TelemetryRecorder recorder;
         private boolean logToolCalls = false;
+        private boolean allowUnauthenticatedRemote = false;
 
         private Builder(final String name, final String version) {
             this.name = name;
@@ -1410,6 +1464,24 @@ public final class McpServer {
                 throw new IllegalArgumentException("maxBatchSize must be positive");
             }
             this.maxBatchSize = max;
+            return this;
+        }
+
+        /**
+         * Allows requests from non-loopback peers that carry no authenticated principal.
+         *
+         * <p>By default a request from a non-loopback peer is rejected with HTTP 401 unless an
+         * authentication layer (e.g. {@code serve-auth}'s {@code AuthMiddleware}) has bound
+         * {@link RequestContext#PRINCIPAL}. Call this only for a server that is deliberately open.
+         *
+         * <p>The check uses the transport's peer address. Behind a reverse proxy running on the same
+         * host every request appears to come from loopback, so the proxy itself must authenticate
+         * callers.
+         *
+         * @return this builder
+         */
+        public Builder allowUnauthenticatedRemote() {
+            this.allowUnauthenticatedRemote = true;
             return this;
         }
 

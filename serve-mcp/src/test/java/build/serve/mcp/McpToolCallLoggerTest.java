@@ -117,8 +117,13 @@ class McpToolCallLoggerTest {
             .build();
         server = TestServer.of(RouterBuilder.create().route("/mcp", mcpServer.handler()).build());
 
+        final var initialize = server.post("/mcp")
+            .header("Content-Type", "application/json")
+            .body("{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{}}")
+            .send();
         server.post("/mcp")
             .header("Content-Type", "application/json")
+            .header("Mcp-Session-Id", initialize.header("Mcp-Session-Id"))
             .body("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
                 + "\"params\":{\"name\":\"ping\",\"arguments\":{}}}")
             .send()
