@@ -195,7 +195,7 @@ public interface ServerApplication
          * @return the {@link ErrorHandler}
          */
         protected ErrorHandler errorHandler() {
-            return new DefaultErrorHandler();
+            return new DefaultErrorHandler(recorder);
         }
 
         /**
@@ -252,7 +252,7 @@ public interface ServerApplication
             this.shutdownHook = new Thread(this::stop, "serve-shutdown");
             Runtime.getRuntime().addShutdownHook(shutdownHook);
 
-            recorder.info("ServerApplication started on " + transport.address());
+            recorder.info("ServerApplication started on %s", transport.address());
 
             startFuture.complete(this);
         }
@@ -296,7 +296,7 @@ public interface ServerApplication
             this.shutdownHook = new Thread(this::stop, "serve-shutdown");
             Runtime.getRuntime().addShutdownHook(shutdownHook);
 
-            recorder.info("ServerApplication started on " + transport.address() + " (HTTPS)");
+            recorder.info("ServerApplication started on %s (HTTPS)", transport.address());
 
             startFuture.complete(this);
         }

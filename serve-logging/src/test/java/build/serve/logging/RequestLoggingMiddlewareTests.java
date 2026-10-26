@@ -20,15 +20,20 @@
 package build.serve.logging;
 
 import build.base.json.JsonValue;
+import build.base.telemetry.TelemetryRecorder;
+import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.serve.foundation.Exchange;
 import build.serve.foundation.Request;
 import build.serve.foundation.Response;
 import build.serve.foundation.SimpleExchange;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -156,18 +161,136 @@ class RequestLoggingMiddlewareTests {
         assertThat(response.statusCode).isEqualTo(200);
     }
 
+    @Test
+    void shouldLogRequestWhosePathContainsPercent() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var middleware = RequestLoggingMiddleware.builder().recorder(recorderTo(output)).build();
+
+        var response = new StubResponse();
+        var exchange = new SimpleExchange(new StubRequest("GET", URI.create("/a%25s"), Map.of()), response);
+
+        middleware.apply(ex -> ex.response().status(200)).handle(exchange);
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("GET /a%s -> 200");
+    }
+
+    @Test
+    void shouldLogQueryStringContainingPercentEncoding() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var middleware = RequestLoggingMiddleware.builder()
+            .includeQueryString(true)
+            .recorder(recorderTo(output))
+            .build();
+
+        var response = new StubResponse();
+        var exchange = new SimpleExchange(new StubRequest("GET", URI.create("/search?q=a%20b"), Map.of()), response);
+
+        middleware.apply(ex -> ex.response().status(200)).handle(exchange);
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("GET /search?q=a%20b -> 200");
+    }
+
+    @Test
+    void shouldLogHeadersContainingPercent() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var middleware = RequestLoggingMiddleware.builder()
+            .includeHeaders(true)
+            .recorder(recorderTo(output))
+            .build();
+
+        var response = new StubResponse();
+        var headers = Map.of("X-Trace", List.of("100%d"));
+        var exchange = new SimpleExchange(new StubRequest("GET", URI.create("/ok"), headers), response);
+
+        middleware.apply(ex -> ex.response().status(200)).handle(exchange);
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("100%d");
+    }
+
+    @Test
+    void shouldPropagateOriginalExceptionWhenPathContainsPercent() {
+        var output = new ByteArrayOutputStream();
+        var middleware = RequestLoggingMiddleware.builder().recorder(recorderTo(output)).build();
+
+        var response = new StubResponse();
+        var exchange = new SimpleExchange(new StubRequest("GET", URI.create("/a%25s"), Map.of()), response);
+
+        assertThatThrownBy(() -> middleware.apply(ex -> {
+            throw new IllegalStateException("boom");
+        }).handle(exchange))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessage("boom");
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("GET /a%s -> ERROR");
+    }
+
+    @Test
+    void shouldNotLogCredentialHeaders() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var middleware = RequestLoggingMiddleware.builder()
+            .includeHeaders(true)
+            .recorder(recorderTo(output))
+            .build();
+
+        var response = new StubResponse();
+        var headers = Map.of(
+            "Authorization", List.of("Bearer s3cret-token"),
+            "Cookie", List.of("session=s3cret-cookie"),
+            "Accept", List.of("text/plain"));
+        var exchange = new SimpleExchange(new StubRequest("GET", URI.create("/ok"), headers), response);
+
+        middleware.apply(ex -> ex.response().status(200)).handle(exchange);
+
+        var logged = output.toString(StandardCharsets.UTF_8);
+
+        assertThat(logged)
+            .doesNotContain("s3cret-token")
+            .doesNotContain("s3cret-cookie")
+            .contains("text/plain");
+    }
+
+    @Test
+    void shouldRedactAdditionalHeadersCaseInsensitively() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var middleware = RequestLoggingMiddleware.builder()
+            .includeHeaders(true)
+            .redactHeader("X-Api-Key")
+            .recorder(recorderTo(output))
+            .build();
+
+        var response = new StubResponse();
+        var headers = Map.of(
+            "x-API-key", List.of("s3cret-key"),
+            "Accept", List.of("text/plain"));
+        var exchange = new SimpleExchange(new StubRequest("GET", URI.create("/ok"), headers), response);
+
+        middleware.apply(ex -> ex.response().status(200)).handle(exchange);
+
+        assertThat(output.toString(StandardCharsets.UTF_8))
+            .doesNotContain("s3cret-key")
+            .contains("text/plain");
+    }
+
+    private static TelemetryRecorder recorderTo(final ByteArrayOutputStream output) {
+        var stream = new PrintStream(output, true, StandardCharsets.UTF_8);
+
+        return PrintStreamTelemetryRecorder.of(URI.create("serve://logging-test"), stream, stream);
+    }
+
     private static Exchange createExchange(final String method, final String path, final StubResponse response) {
-        return new SimpleExchange(new StubRequest(method, path), response);
+        return new SimpleExchange(new StubRequest(method, URI.create(path), Map.of()), response);
     }
 
     private static final class StubRequest implements Request {
 
         private final String method;
-        private final String path;
+        private final URI uri;
+        private final Map<String, List<String>> headers;
 
-        StubRequest(final String method, final String path) {
+        StubRequest(final String method, final URI uri, final Map<String, List<String>> headers) {
             this.method = method;
-            this.path = path;
+            this.uri = uri;
+            this.headers = headers;
         }
 
         @Override
@@ -177,12 +300,12 @@ class RequestLoggingMiddlewareTests {
 
         @Override
         public URI uri() {
-            return URI.create(path);
+            return uri;
         }
 
         @Override
         public String path() {
-            return path;
+            return uri.getPath();
         }
 
         @Override
@@ -202,7 +325,7 @@ class RequestLoggingMiddlewareTests {
 
         @Override
         public Map<String, List<String>> headers() {
-            return Map.of();
+            return headers;
         }
 
         @Override

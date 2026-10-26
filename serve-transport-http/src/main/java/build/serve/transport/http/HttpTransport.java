@@ -452,8 +452,12 @@ public class HttpTransport {
                 } catch (final Exception e) {
                     try {
                         errorHandler.handle(exchange, e);
-                    } catch (final Exception ignored) {
+                    } catch (final Exception failure) {
                         // response may already be committed
+                        if (failure != e) {
+                            failure.addSuppressed(e);
+                        }
+                        recorder.error(failure, "Error handler failed while handling %s", e);
                     }
                 } finally {
                     httpExchange.close();
@@ -468,7 +472,7 @@ public class HttpTransport {
     public void start() {
         httpServer.start();
 
-        recorder.info("HttpTransport started on " + address);
+        recorder.info("HttpTransport started on %s", address);
     }
 
     /**

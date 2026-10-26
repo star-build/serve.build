@@ -20,14 +20,17 @@
 package build.serve.auth;
 
 import build.base.json.JsonValue;
+import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.serve.foundation.Exchange;
 import build.serve.foundation.Request;
 import build.serve.foundation.Response;
 import build.serve.foundation.SimpleExchange;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -44,6 +47,17 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class AuthMiddlewareTests {
 
     private static final Principal REED = SimplePrincipal.of("reed");
+
+    @Test
+    void shouldWarnAboutQueryParamKeyWhenParamNameContainsPercent() {
+        var output = new ByteArrayOutputStream();
+        var stream = new PrintStream(output, true, StandardCharsets.UTF_8);
+        var recorder = PrintStreamTelemetryRecorder.of(URI.create("serve://auth-test"), stream, stream);
+
+        ApiKeyStrategy.fromQueryParam("key%s", key -> Optional.empty(), recorder);
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("fromQueryParam(\"key%s\")");
+    }
 
     // --- AuthMiddleware ---
 
