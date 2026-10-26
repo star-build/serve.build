@@ -58,6 +58,9 @@ public final class SseUpgrade {
 
             httpExchange.sendResponseHeaders(200, 0);
 
+            // The stream is long-lived by design, so the request timeout must not interrupt it
+            exchange.attribute(Exchange.CANCEL_TIMEOUT_ATTRIBUTE, Runnable.class).ifPresent(Runnable::run);
+
             final var out = httpExchange.getResponseBody();
             final var emitter = new SseEmitterImpl(out);
 

@@ -45,6 +45,9 @@ record McpCatalog(Map<String, McpTool> tools,
                   List<TemplateEntry> templates,
                   Map<String, McpPrompt> prompts) {
 
+    private static final Pattern ENCODED_DOT = Pattern.compile("%2e", Pattern.CASE_INSENSITIVE);
+    private static final Pattern ENCODED_SEPARATOR = Pattern.compile("%2f|%5c|\\\\", Pattern.CASE_INSENSITIVE);
+
     static McpCatalog of(final List<McpTool> tools,
                          final List<McpResource> resources,
                          final List<McpResourceTemplate> templates,
@@ -59,10 +62,25 @@ record McpCatalog(Map<String, McpTool> tools,
     }
 
     /**
-     * Finds the template whose URI pattern matches a concrete resource URI.
+     * Finds the template whose URI pattern matches a concrete resource URI. A URI with a {@code ..}
+     * path segment, literal or percent-encoded, matches no template, so a template's {@code read}
+     * never receives a traversal path.
      */
     Optional<McpResourceTemplate> templateMatching(final String uri) {
+        if (hasParentSegment(uri)) {
+            return Optional.empty();
+        }
         return findTemplate(entry -> entry.pattern().matcher(uri).matches());
+    }
+
+    private static boolean hasParentSegment(final String uri) {
+        final var separated = ENCODED_SEPARATOR.matcher(uri).replaceAll("/");
+        for (final var segment : separated.split("/", -1)) {
+            if (ENCODED_DOT.matcher(segment).replaceAll(".").equals("..")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

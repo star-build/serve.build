@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -38,6 +39,19 @@ final class TimeoutExecutor implements Executor, AutoCloseable {
     private final long timeoutMillis;
     private final ScheduledExecutorService scheduler;
 
+    private static final ThreadLocal<ScheduledFuture<?>> CURRENT = new ThreadLocal<>();
+
+    /**
+     * Obtains an action that cancels the timeout of the task running on the calling thread.
+     *
+     * @return the cancel action, or a no-op when the calling thread is not running a timed task
+     */
+    static Runnable cancelCurrent() {
+        final var future = CURRENT.get();
+        return future == null ? () -> {
+        } : () -> future.cancel(false);
+    }
+
     TimeoutExecutor(final Executor delegate, final Duration timeout) {
         this.delegate = delegate;
         this.timeoutMillis = timeout.toMillis();
@@ -51,9 +65,11 @@ final class TimeoutExecutor implements Executor, AutoCloseable {
             final var thread = Thread.currentThread();
             final var future = scheduler.schedule(
                 thread::interrupt, timeoutMillis, TimeUnit.MILLISECONDS);
+            CURRENT.set(future);
             try {
                 command.run();
             } finally {
+                CURRENT.remove();
                 future.cancel(false);
                 Thread.interrupted(); // clear interrupt status so the thread can be reused
             }

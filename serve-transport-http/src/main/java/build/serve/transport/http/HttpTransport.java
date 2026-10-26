@@ -445,6 +445,7 @@ public class HttpTransport {
 
             // Expose the underlying HttpExchange for WebSocket upgrade support
             exchange.attribute(Exchange.HTTP_EXCHANGE_ATTRIBUTE, httpExchange);
+            exchange.attribute(Exchange.CANCEL_TIMEOUT_ATTRIBUTE, TimeoutExecutor.cancelCurrent());
 
             RequestContext.run(exchange, () -> {
                 try {

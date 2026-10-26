@@ -66,6 +66,14 @@ public interface Exchange {
     String HTTP_EXCHANGE_ATTRIBUTE = "_httpExchange";
 
     /**
+     * The attribute key used to store a {@link Runnable} that cancels the request timeout for this exchange.
+     * <p>
+     * Set by the HTTP transport layer when a request timeout is configured. Handlers that hold the connection
+     * open by design, such as Server-Sent Events, run it so the timeout does not interrupt the stream.
+     */
+    String CANCEL_TIMEOUT_ATTRIBUTE = "_cancelTimeout";
+
+    /**
      * Obtains the {@link Request} for this {@link Exchange}.
      *
      * @return the {@link Request}
