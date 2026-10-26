@@ -19,6 +19,8 @@
  */
 package build.serve.mcp;
 
+import build.serve.mcp.tool.ToolDef;
+import build.serve.mcp.tool.ToolParam;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;

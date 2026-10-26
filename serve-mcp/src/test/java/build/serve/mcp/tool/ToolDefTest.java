@@ -17,13 +17,15 @@
  * limitations under the License.
  * #L%
  */
-package build.serve.mcp;
+package build.serve.mcp.tool;
 
 import build.base.json.Json;
 import build.base.json.JsonArray;
 import build.base.json.JsonNull;
 import build.base.json.JsonObject;
 import build.base.json.JsonValue;
+import build.serve.mcp.McpContent;
+import build.serve.mcp.McpToolResult;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

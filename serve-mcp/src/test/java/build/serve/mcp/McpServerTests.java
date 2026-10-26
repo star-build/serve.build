@@ -27,6 +27,8 @@ import build.base.telemetry.Warning;
 import build.base.telemetry.foundation.ObservableTelemetryRecorder;
 import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.serve.foundation.routing.RouterBuilder;
+import build.serve.mcp.tool.ToolDef;
+import build.serve.mcp.tool.ToolParam;
 import build.serve.testing.TestServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;

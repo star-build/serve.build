@@ -25,4 +25,5 @@ module build.serve.mcp {
     requires build.base.telemetry.foundation;
 
     exports build.serve.mcp;
+    exports build.serve.mcp.tool;
 }
