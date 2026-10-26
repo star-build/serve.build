@@ -65,6 +65,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -113,6 +114,11 @@ public final class McpServer {
     private final TelemetryRecorder recorder;
     private final SubscriberRegistry<ToolCallEvent> toolCallEvents = new SubscriberRegistry<>();
     private final ConcurrentHashMap<String, SessionState> sessions = new ConcurrentHashMap<>();
+    private final int maxSessionsPerPrincipal;
+    private final int maxStdioLineLength;
+    private final int maxConcurrentRequests;
+    private final Semaphore inFlightRequests;
+    private final Object sessionReservationLock = new Object();
     private final AtomicLong invocationCounter = new AtomicLong();
     private volatile SessionState stdioSession;
     private volatile LinkedBlockingQueue<Optional<String>> stdioOutputQueue;
@@ -125,6 +131,10 @@ public final class McpServer {
         this.maxSessions = builder.maxSessions;
         this.maxSubscriptionsPerSession = builder.maxSubscriptionsPerSession;
         this.maxBatchSize = builder.maxBatchSize;
+        this.maxSessionsPerPrincipal = builder.maxSessionsPerPrincipal;
+        this.maxStdioLineLength = builder.maxStdioLineLength;
+        this.maxConcurrentRequests = builder.maxConcurrentRequests;
+        this.inFlightRequests = new Semaphore(builder.maxConcurrentRequests);
         this.allowUnauthenticatedRemote = builder.allowUnauthenticatedRemote;
         this.recorder = builder.recorder;
 
@@ -208,6 +218,37 @@ public final class McpServer {
         return "local".equals(sessionId) ? stdioSession : sessions.get(sessionId);
     }
 
+    /**
+     * Registers a new session for the current principal if there is capacity, both overall and
+     * for that principal, checking and inserting under one lock so that concurrent
+     * {@code initialize} calls cannot overshoot {@code maxSessions}. Removals need no lock, as
+     * they only free capacity.
+     *
+     * @return the new session id, or {@code null} if the server is at capacity
+     */
+    private String reserveSession() {
+        synchronized (sessionReservationLock) {
+            if (sessions.size() >= maxSessions) {
+                return null;
+            }
+            final var principal = currentPrincipal();
+            if (principal != null && sessions.values().stream()
+                .filter(state -> principal.equals(state.principal))
+                .count() >= maxSessionsPerPrincipal) {
+                return null;
+            }
+            final var id = UUID.randomUUID().toString();
+            sessions.put(id, new SessionState(principal));
+            return id;
+        }
+    }
+
+    private void releaseReservation(final String sessionId) {
+        if (sessionId != null) {
+            sessions.remove(sessionId);
+        }
+    }
+
     private static Object currentPrincipal() {
         return RequestContext.PRINCIPAL.isBound() ? RequestContext.PRINCIPAL.get() : null;
     }
@@ -262,10 +303,33 @@ public final class McpServer {
      * Implements the MCP streamable HTTP transport (spec 2025-03-26). POST requests receive either
      * a JSON response or an SSE stream depending on the client's {@code Accept} header. Session IDs
      * are issued during {@code initialize} and validated on subsequent requests.
+     * <p>
+     * At most {@link Builder#maxConcurrentRequests(int)} JSON-RPC requests are handled at once, each
+     * item of a batch counting as one; further POST and DELETE requests get 503. Open SSE streams are
+     * not counted, as they are bounded by the session caps.
      *
      * @return the handler
      */
     public Handler handler() {
+        final var routing = routingHandler();
+        return exchange -> {
+            if ("GET".equalsIgnoreCase(exchange.request().method())) {
+                routing.handle(exchange);
+                return;
+            }
+            if (!inFlightRequests.tryAcquire()) {
+                exchange.response().status(503).send("Too many concurrent requests");
+                return;
+            }
+            try {
+                routing.handle(exchange);
+            } finally {
+                inFlightRequests.release();
+            }
+        };
+    }
+
+    private Handler routingHandler() {
         return exchange -> {
             if (!isOriginAllowed(exchange) || !isHostAllowed(exchange)) {
                 exchange.response().status(403).send("Forbidden");
@@ -321,7 +385,18 @@ public final class McpServer {
                     exchange.response().status(404).send("Session not found");
                     return;
                 }
-                final var maybeResponse = dispatchBatch(batch, sessionId.get());
+                // the handler already holds one permit for the request itself
+                final var extraPermits = permitsFor(batch) - 1;
+                if (!inFlightRequests.tryAcquire(extraPermits)) {
+                    exchange.response().status(503).send("Too many concurrent requests");
+                    return;
+                }
+                final Optional<JsonValue> maybeResponse;
+                try {
+                    maybeResponse = dispatchBatch(batch, sessionId.get());
+                } finally {
+                    inFlightRequests.release(extraPermits);
+                }
                 if (maybeResponse.isEmpty()) {
                     exchange.response().status(202).send("");
                     return;
@@ -350,21 +425,27 @@ public final class McpServer {
                 return;
             }
 
-            if (isInitialize && sessions.size() >= maxSessions) {
+            final var newSessionId = isInitialize ? reserveSession() : null;
+            if (isInitialize && newSessionId == null) {
                 exchange.response().status(503).send("Too many sessions");
                 return;
             }
 
-            final var maybeResponse = dispatch(request, sessionId.orElse(null));
+            final Optional<JsonObject> maybeResponse;
+            try {
+                maybeResponse = dispatch(request, sessionId.orElse(null));
+            } catch (final RuntimeException | Error e) {
+                releaseReservation(newSessionId);
+                throw e;
+            }
 
             if (maybeResponse.isEmpty()) {
+                releaseReservation(newSessionId);
                 exchange.response().status(202).send("");
                 return;
             }
 
-            if (isInitialize) {
-                final var newSessionId = UUID.randomUUID().toString();
-                sessions.put(newSessionId, new SessionState(currentPrincipal()));
+            if (newSessionId != null) {
                 exchange.response().header("Mcp-Session-Id", newSessionId);
             }
 
@@ -424,16 +505,29 @@ public final class McpServer {
         try {
             // closing the executor waits for every in-flight dispatch, on EOF or on error
             try (var dispatcher = Executors.newVirtualThreadPerTaskExecutor()) {
-                String line;
-                while ((line = reader.readLine()) != null) {
+                Optional<StdioLine> next;
+                while ((next = readLine(reader)).isPresent()) {
+                    if (next.get().oversized()) {
+                        recorder.warn("Discarding stdio line longer than %d characters", maxStdioLineLength);
+                        continue;
+                    }
+                    final var line = next.get().text();
                     if (line.isBlank()) {
                         continue;
                     }
-                    final var captured = line;
+                    final JsonValue parsed;
+                    try {
+                        parsed = Json.parse(line);
+                    } catch (final RuntimeException e) {
+                        recorder.warn("Discarding malformed stdio line: %s", e.getMessage());
+                        continue;
+                    }
+                    final var permits = parsed instanceof JsonArray batch ? permitsFor(batch) : 1;
+                    // waits for free slots, so a flood of lines backs up in the pipe rather than in threads;
+                    // only this thread acquires, so a batch waiting for its permits cannot deadlock
+                    inFlightRequests.acquireUninterruptibly(permits);
                     dispatcher.execute(() -> {
-                        JsonValue parsed = null;
                         try {
-                            parsed = Json.parse(captured);
                             if (parsed instanceof JsonArray batch) {
                                 dispatchBatch(batch, "local")
                                     .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
@@ -450,6 +544,8 @@ public final class McpServer {
                                 internalError(request).ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
                             }
                             throw e;
+                        } finally {
+                            inFlightRequests.release(permits);
                         }
                     });
                 }
@@ -467,6 +563,55 @@ public final class McpServer {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    /**
+     * The in-flight permits a batch needs: one per item, as each runs concurrently. A batch larger
+     * than {@code maxConcurrentRequests} takes all of them so that it can still run, alone. A batch
+     * that is empty or over {@code maxBatchSize} is rejected without running any item, so takes one.
+     */
+    private int permitsFor(final JsonArray batch) {
+        final var size = batch.values().size();
+        if (size == 0 || size > maxBatchSize) {
+            return 1;
+        }
+        return Math.min(size, maxConcurrentRequests);
+    }
+
+    private record StdioLine(String text, boolean oversized) {
+    }
+
+    /**
+     * Reads one line without buffering more than {@code maxStdioLineLength} characters. A longer
+     * line is consumed to its end and reported as oversized, with no text.
+     *
+     * @return the line, or empty at end of input
+     */
+    private Optional<StdioLine> readLine(final BufferedReader reader) throws IOException {
+        final var line = new StringBuilder();
+        boolean oversized = false;
+        int c;
+        while ((c = reader.read()) != -1) {
+            if (c == '\n') {
+                return Optional.of(new StdioLine(oversized ? "" : line.toString(), oversized));
+            }
+            if (c == '\r') {
+                // a raw CR cannot occur inside a JSON string, so this only drops CRLF terminators
+                continue;
+            }
+            if (!oversized) {
+                if (line.length() >= maxStdioLineLength) {
+                    oversized = true;
+                    line.setLength(0);
+                } else {
+                    line.append((char) c);
+                }
+            }
+        }
+        if (oversized || !line.isEmpty()) {
+            return Optional.of(new StdioLine(oversized ? "" : line.toString(), oversized));
+        }
+        return Optional.empty();
     }
 
     private Optional<JsonObject> dispatch(final JsonObject request,
@@ -1321,6 +1466,9 @@ public final class McpServer {
         private int maxSessions = 10_000;
         private int maxSubscriptionsPerSession = 1_000;
         private int maxBatchSize = 1_000;
+        private int maxSessionsPerPrincipal = 100;
+        private int maxConcurrentRequests = 1_000;
+        private int maxStdioLineLength = 10 * 1024 * 1024;
         private Duration sessionIdleTimeout = Duration.ofHours(1);
         private TelemetryRecorder recorder;
         private boolean logToolCalls = false;
@@ -1505,6 +1653,55 @@ public final class McpServer {
                 throw new IllegalArgumentException("maxBatchSize must be positive");
             }
             this.maxBatchSize = max;
+            return this;
+        }
+
+        /**
+         * Sets the maximum number of concurrent sessions one authenticated principal may hold
+         * (default 100), so that a single caller cannot take every slot under {@link #maxSessions(int)}.
+         * {@code initialize} requests beyond the cap are rejected with 503. Sessions without a
+         * principal are bounded only by {@link #maxSessions(int)}.
+         *
+         * @param max the cap; must be positive
+         * @return this builder
+         */
+        public Builder maxSessionsPerPrincipal(final int max) {
+            if (max <= 0) {
+                throw new IllegalArgumentException("maxSessionsPerPrincipal must be positive");
+            }
+            this.maxSessionsPerPrincipal = max;
+            return this;
+        }
+
+        /**
+         * Sets the maximum number of JSON-RPC requests being handled at once (default 1,000), each
+         * item of a batch counting as one. HTTP requests beyond the cap are rejected with 503. On
+         * stdio the reader waits for free slots instead. A batch larger than the cap takes all of
+         * it and runs alone, so keep {@link #maxBatchSize(int)} at or below this.
+         *
+         * @param max the cap; must be positive
+         * @return this builder
+         */
+        public Builder maxConcurrentRequests(final int max) {
+            if (max <= 0) {
+                throw new IllegalArgumentException("maxConcurrentRequests must be positive");
+            }
+            this.maxConcurrentRequests = max;
+            return this;
+        }
+
+        /**
+         * Sets the maximum length in characters of one stdio line (default 10 MiB). A longer line
+         * is discarded with a warning and the loop carries on with the next one.
+         *
+         * @param max the cap; must be positive
+         * @return this builder
+         */
+        public Builder maxStdioLineLength(final int max) {
+            if (max <= 0) {
+                throw new IllegalArgumentException("maxStdioLineLength must be positive");
+            }
+            this.maxStdioLineLength = max;
             return this;
         }
 
