@@ -20,6 +20,7 @@
 package build.serve.mcp;
 
 import build.base.json.JsonArray;
+import build.base.json.JsonNull;
 import build.base.json.JsonObject;
 import build.base.json.JsonValue;
 
@@ -59,7 +60,8 @@ import java.util.Optional;
  * }</pre>
  *
  * <p>{@code inputSchema()} is derived from {@code params()}. {@code call()} wraps {@code handle()}
- * with null-argument normalization and exception-to-error conversion.
+ * with null-argument normalization and turns an {@link IllegalArgumentException} into an error result;
+ * any other exception propagates to the server, which reports a generic failure to the client.
  *
  * @author reed.vonredwitz
  * @since May-2026
@@ -114,14 +116,15 @@ public interface ToolDef extends McpTool {
     }
 
     @Override
-    default McpToolResult call(final JsonValue arguments) {
+    default McpToolResult call(final JsonValue arguments) throws Exception {
         try {
-            final JsonValue args = arguments != null ? arguments : JsonObject.builder().build();
+            // "arguments" is optional on tools/call; the server passes JsonNull when it is omitted
+            final JsonValue args = arguments == null || arguments instanceof JsonNull
+                ? JsonObject.builder().build()
+                : arguments;
             return handle(args);
         } catch (final IllegalArgumentException e) {
             return McpToolResult.error(sanitize(e.getMessage()));
-        } catch (final Exception e) {
-            return McpToolResult.error("Unexpected error: " + sanitize(e.getMessage()));
         }
     }
 

@@ -431,8 +431,9 @@ public final class McpServer {
                     }
                     final var captured = line;
                     dispatcher.execute(() -> {
+                        JsonValue parsed = null;
                         try {
-                            final var parsed = Json.parse(captured);
+                            parsed = Json.parse(captured);
                             if (parsed instanceof JsonArray batch) {
                                 dispatchBatch(batch, "local")
                                     .ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
@@ -442,6 +443,13 @@ public final class McpServer {
                             }
                         } catch (final RuntimeException e) {
                             recorder.warn("Discarding malformed stdio line: %s", e.getMessage());
+                        } catch (final Error e) {
+                            // there is no connection to abort on stdio, so answer the request
+                            // rather than leave the client waiting, then let the Error propagate
+                            if (parsed instanceof JsonObject request) {
+                                internalError(request).ifPresent(r -> queue.offer(Optional.of(r.toJsonString())));
+                            }
+                            throw e;
                         }
                     });
                 }
@@ -520,6 +528,14 @@ public final class McpServer {
         return Optional.of(response);
     }
 
+    private static Optional<JsonObject> internalError(final JsonObject request) {
+        final var id = request.members().get("id");
+        if (id == null || id instanceof JsonNull) {
+            return Optional.empty();
+        }
+        return Optional.of(errorEnvelope(id, -32603, "Internal error"));
+    }
+
     private Optional<JsonValue> dispatchBatch(final JsonArray batch, final String sessionId) {
         if (batch.values().isEmpty()) {
             return Optional.of(errorEnvelope(JsonNull.INSTANCE, -32600, "Invalid Request: empty batch"));
@@ -539,6 +555,10 @@ public final class McpServer {
             Thread.ofVirtual().start(() -> {
                 try {
                     dispatch(req, sessionId).ifPresent(responses::add);
+                } catch (final Error e) {
+                    // answer the request so the batch reply stays complete, then let the Error propagate
+                    internalError(req).ifPresent(responses::add);
+                    throw e;
                 } finally {
                     remaining.countDown();
                 }
@@ -733,9 +753,16 @@ public final class McpServer {
             toolCallEvents.publish(ToolCallEvent.succeeded(invocationId, sessionId, toolName, arguments, toolResult, duration));
             return envelope(id, buildToolResultJson(toolResult));
         } catch (final Throwable e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
             final var duration = Duration.between(start, Instant.now());
             toolCallEvents.publish(ToolCallEvent.failed(invocationId, sessionId, toolName, arguments, e, duration));
-            return envelope(id, buildToolResultJson(McpToolResult.error(sanitizeMessage(e.getMessage()))));
+            recorder.warn(e, "Tool %s failed", toolName);
+            if (e instanceof Error error) {
+                throw error;
+            }
+            return envelope(id, buildToolResultJson(McpToolResult.error("Tool execution failed")));
         }
     }
 
@@ -894,7 +921,11 @@ public final class McpServer {
                 content = matched.read(uri);
             }
         } catch (final Exception e) {
-            return errorEnvelope(id, -32002, "Failed to read resource: " + sanitizeMessage(e.getMessage()));
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            recorder.warn(e, "Failed to read resource %s", sanitizeMessage(uri));
+            return errorEnvelope(id, -32002, "Failed to read resource");
         }
 
         final var contentNode = switch (content) {
@@ -1005,7 +1036,11 @@ public final class McpServer {
         try {
             result = prompt.get(Map.copyOf(argMap));
         } catch (final Exception e) {
-            return errorEnvelope(id, -32603, "Prompt rendering failed: " + sanitizeMessage(e.getMessage()));
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            recorder.warn(e, "Prompt %s failed", sanitizeMessage(name));
+            return errorEnvelope(id, -32603, "Prompt rendering failed");
         }
 
         final var messagesArray = JsonArray.builder();
@@ -1046,25 +1081,31 @@ public final class McpServer {
         final var argName = getString(argObj, "name");
         final var argValue = getString(argObj, "value");
 
-        final List<String> values = switch (refType) {
-            case "ref/prompt" -> {
-                final var prompt = prompts.get(getString(refObj, "name"));
-                if (prompt == null) {
-                    yield List.of();
+        final List<String> values;
+        try {
+            values = switch (refType) {
+                case "ref/prompt" -> {
+                    final var prompt = prompts.get(getString(refObj, "name"));
+                    if (prompt == null) {
+                        yield List.of();
+                    }
+                    yield prompt.arguments().stream()
+                        .filter(a -> a.name().equals(argName))
+                        .findFirst()
+                        .flatMap(McpPromptArgument::completer)
+                        .map(fn -> fn.apply(argValue))
+                        .orElse(List.of());
                 }
-                yield prompt.arguments().stream()
-                    .filter(a -> a.name().equals(argName))
-                    .findFirst()
-                    .flatMap(McpPromptArgument::completer)
-                    .map(fn -> fn.apply(argValue))
-                    .orElse(List.of());
-            }
-            case "ref/resource" -> {
-                final var template = findTemplateByUri(getString(refObj, "uri"));
-                yield template == null ? List.of() : template.complete(argName, argValue);
-            }
-            default -> List.of();
-        };
+                case "ref/resource" -> {
+                    final var template = findTemplateByUri(getString(refObj, "uri"));
+                    yield template == null ? List.of() : template.complete(argName, argValue);
+                }
+                default -> List.of();
+            };
+        } catch (final Exception e) {
+            recorder.warn(e, "Completion for %s failed", sanitizeMessage(refType));
+            return errorEnvelope(id, -32603, "Completion failed");
+        }
 
         final var capped = values.size() > 100 ? values.subList(0, 100) : values;
         final var arr = JsonArray.builder();
