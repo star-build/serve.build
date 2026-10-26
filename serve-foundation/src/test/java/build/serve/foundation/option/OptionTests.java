@@ -13,7 +13,7 @@ class OptionTests {
     }
 
     @Test
-    void listenAddressDefaultIs0000() {
-        assertThat(ListenAddress.DEFAULT.value()).isEqualTo("0.0.0.0");
+    void listenAddressDefaultIsLoopback() {
+        assertThat(ListenAddress.DEFAULT.value()).isEqualTo("127.0.0.1");
     }
 }
