@@ -21,6 +21,9 @@ package build.serve.foundation.option;
 
 import build.base.configuration.Option;
 
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+
 /**
  * An {@link Option} to define the address on which a server listens.
  *
@@ -32,9 +35,24 @@ public record ListenAddress(String value)
     implements Option {
 
     /**
-     * The default {@link ListenAddress} ("0.0.0.0").
+     * The default {@link ListenAddress} ("127.0.0.1"). Listening on every interface, as
+     * {@code "0.0.0.0"} does, must be requested explicitly.
      */
-    public static final ListenAddress DEFAULT = new ListenAddress("0.0.0.0");
+    public static final ListenAddress DEFAULT = new ListenAddress("127.0.0.1");
+
+    /**
+     * Determines whether this {@link ListenAddress} binds only the loopback interface.
+     * Wildcard addresses such as {@code 0.0.0.0} and {@code ::} are not loopback.
+     *
+     * @return {@code true} if the address is a loopback address
+     */
+    public boolean isLoopback() {
+        try {
+            return InetAddress.getByName(value).isLoopbackAddress();
+        } catch (final UnknownHostException e) {
+            return false;
+        }
+    }
 
     /**
      * Creates a {@link ListenAddress} for the specified address.
