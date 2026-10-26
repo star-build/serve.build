@@ -20,6 +20,7 @@
 package build.serve.mcp;
 
 import build.base.json.Json;
+import build.base.json.JsonNull;
 import build.base.json.JsonObject;
 import build.base.json.JsonValue;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ToolDefTest {
 
@@ -116,22 +118,52 @@ class ToolDefTest {
     }
 
     @Test
-    void shouldConvertUnexpectedExceptionToError() throws Exception {
+    void shouldReportMissingRequiredArgumentWhenArgumentsAreOmitted() throws Exception {
+        final var required = ToolParam.string("x", "x");
+        final var tool = ToolDef.of("t", "t")
+            .param(required)
+            .handle(args -> McpToolResult.text(required.extract(args)));
+
+        final var result = tool.call(JsonNull.INSTANCE);
+        assertThat(result.isError()).isTrue();
+        assertThat(((McpContent.Text) result.content().getFirst()).text()).contains("Missing required argument 'x'");
+    }
+
+    @Test
+    void shouldLetUnexpectedExceptionsPropagate() {
         final var tool = ToolDef.of("t", "t")
             .handle(args -> {
                 throw new RuntimeException("boom");
             });
 
-        final var result = tool.call(Json.parse("{}"));
-        assertThat(result.isError()).isTrue();
-        assertThat(((McpContent.Text) result.content().getFirst()).text()).contains("Unexpected error");
+        assertThatThrownBy(() -> tool.call(Json.parse("{}"))).hasMessage("boom");
+    }
+
+    @Test
+    void shouldLetAnInterruptPropagate() {
+        final var tool = ToolDef.of("t", "t")
+            .handle(args -> {
+                throw new InterruptedException("stop");
+            });
+
+        assertThatThrownBy(() -> tool.call(Json.parse("{}"))).isInstanceOf(InterruptedException.class);
+    }
+
+    @Test
+    void shouldLetAnErrorPropagate() {
+        final var tool = ToolDef.of("t", "t")
+            .handle(args -> {
+                throw new AssertionError("fatal");
+            });
+
+        assertThatThrownBy(() -> tool.call(Json.parse("{}"))).isInstanceOf(AssertionError.class);
     }
 
     @Test
     void shouldSanitizeCRLFInExceptionMessage() throws Exception {
         final var tool = ToolDef.of("t", "t")
             .handle(args -> {
-                throw new RuntimeException("msg\r\nX-Injected: evil");
+                throw new IllegalArgumentException("msg\r\nX-Injected: evil");
             });
 
         final var result = tool.call(Json.parse("{}"));
@@ -144,7 +176,7 @@ class ToolDefTest {
     void shouldHandleNullExceptionMessageWithoutThrowingOrLiteralNull() throws Exception {
         final var tool = ToolDef.of("t", "t")
             .handle(args -> {
-                throw new RuntimeException();
+                throw new IllegalArgumentException();
             });
 
         final var result = tool.call(Json.parse("{}"));

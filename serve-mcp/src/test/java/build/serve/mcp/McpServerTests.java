@@ -957,9 +957,9 @@ class McpServerTests {
     }
 
     @Test
-    void shouldSanitizeExceptionMessageInToolError() {
-        // Raw McpTool intentionally — tests server-level CRLF sanitization of thrown exceptions,
-        // which ToolDef.call() would swallow before the server sees them.
+    void shouldReplaceExceptionMessageWithGenericMessageInToolError() {
+        // Raw McpTool intentionally — ToolDef.call() turns an IllegalArgumentException into an error
+        // result itself, so this exercises the server's handling of any other thrown exception.
         final var badTool = new McpTool() {
             @Override
             public String name() {
@@ -987,8 +987,7 @@ class McpServerTests {
             final var result = errorClient.call("bad_tool", Map.of());
             final var content = ((JsonArray) result.asObject().members().get("content")).values();
             final var text = content.get(0).asObject().getString("text");
-            assertThat(text).doesNotContain("\r").doesNotContain("\n");
-            assertThat(text).contains("error");
+            assertThat(text).isEqualTo("Tool execution failed");
         }
     }
 
