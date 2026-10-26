@@ -64,7 +64,7 @@ public final class StringParam extends ToolParamBase<String, StringParam> {
         return copy(required, defaultValue,
             val -> {
                 final var s = outer.extract(val);
-                if (s.length() < min) {
+                if (s.codePointCount(0, s.length()) < min) {
                     throw new IllegalArgumentException("'" + name + "' must be at least " + min + " character(s).");
                 }
                 return s;
@@ -78,7 +78,7 @@ public final class StringParam extends ToolParamBase<String, StringParam> {
         return copy(required, defaultValue,
             val -> {
                 final var s = outer.extract(val);
-                if (s.length() > max) {
+                if (s.codePointCount(0, s.length()) > max) {
                     throw new IllegalArgumentException("'" + name + "' must be at most " + max + " character(s).");
                 }
                 return s;

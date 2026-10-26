@@ -118,14 +118,23 @@ public interface ToolParam<T> {
                               final String description) {
         return new StringParam(name, description, true, null,
             val -> val.asString().value(),
-            JsonObject.builder().put("type", "string").put("description", description).build());
+            JsonObject.builder()
+                .put("type", "string")
+                .put("description", description)
+                .put("maxLength", ParamBounds.DEFAULT_MAX_STRING_LENGTH)
+                .build());
     }
 
     static NumberParam<Integer> integer(final String name,
                                         final String description) {
         return new NumberParam<>(name, description, true, null,
             val -> val.asNumber().toNumber().intValue(),
-            JsonObject.builder().put("type", "integer").put("description", description).build());
+            JsonObject.builder()
+                .put("type", "integer")
+                .put("description", description)
+                .put("minimum", ParamBounds.DEFAULT_MIN_INTEGER)
+                .put("maximum", ParamBounds.DEFAULT_MAX_INTEGER)
+                .build());
     }
 
     static BoolParam bool(final String name,

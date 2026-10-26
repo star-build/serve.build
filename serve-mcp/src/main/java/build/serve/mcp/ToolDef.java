@@ -122,6 +122,7 @@ public interface ToolDef extends McpTool {
             final JsonValue args = arguments == null || arguments instanceof JsonNull
                 ? JsonObject.builder().build()
                 : arguments;
+            ParamBounds.validate(params(), args);
             return handle(args);
         } catch (final IllegalArgumentException e) {
             return McpToolResult.error(sanitize(e.getMessage()));
