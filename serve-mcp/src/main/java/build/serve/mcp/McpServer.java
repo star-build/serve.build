@@ -66,6 +66,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -79,10 +80,13 @@ import java.util.regex.Pattern;
  * returned by {@link #handler()} is registered. Standalone use without such a wrapper
  * is an open server.
  *
+ * <p><strong>Lifecycle:</strong> a server runs a background thread that evicts idle sessions.
+ * {@link #close()} stops it and ends every open session's SSE stream.
+ *
  * @author reed.vonredwitz
  * @since Mar-2026
  */
-public final class McpServer {
+public final class McpServer implements AutoCloseable {
 
     /**
      * ScopedValue bound to the current MCP session ID for the duration of each tool call.
@@ -120,6 +124,8 @@ public final class McpServer {
     private final Semaphore inFlightRequests;
     private final Object sessionReservationLock = new Object();
     private final AtomicLong invocationCounter = new AtomicLong();
+    private final AtomicBoolean hostRejectionWarned = new AtomicBoolean();
+    private final Thread sessionReaper;
     private volatile SessionState stdioSession;
     private volatile LinkedBlockingQueue<Optional<String>> stdioOutputQueue;
 
@@ -138,7 +144,7 @@ public final class McpServer {
         this.allowUnauthenticatedRemote = builder.allowUnauthenticatedRemote;
         this.recorder = builder.recorder;
 
-        startSessionReaper(builder.sessionIdleTimeout);
+        this.sessionReaper = startSessionReaper(builder.sessionIdleTimeout);
 
         final var toolMap = new LinkedHashMap<String, McpTool>();
         for (final var tool : builder.tools) {
@@ -165,9 +171,10 @@ public final class McpServer {
         this.prompts = Map.copyOf(promptMap);
     }
 
-    private void startSessionReaper(final Duration idleTimeout) {
-        final long intervalMs = Math.min(idleTimeout.toMillis() / 2, Duration.ofMinutes(5).toMillis());
-        Thread.ofVirtual().name("mcp-session-reaper").start(() -> {
+    private Thread startSessionReaper(final Duration idleTimeout) {
+        final long intervalMs = Math.clamp(idleTimeout.toMillis() / 2,
+            MIN_REAPER_INTERVAL.toMillis(), Duration.ofMinutes(5).toMillis());
+        return Thread.ofVirtual().name("mcp-session-reaper").start(() -> {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
                     Thread.sleep(intervalMs);
@@ -183,6 +190,20 @@ public final class McpServer {
                 }
             }
         });
+    }
+
+    /**
+     * Stops the session reaper and ends every open session, closing their SSE streams. Safe to
+     * call more than once. The server must not be used afterwards.
+     */
+    @Override
+    public void close() {
+        sessionReaper.interrupt();
+        for (final var entry : sessions.entrySet()) {
+            if (sessions.remove(entry.getKey(), entry.getValue())) {
+                closeEmitter(entry.getValue());
+            }
+        }
     }
 
     /**
@@ -331,7 +352,12 @@ public final class McpServer {
 
     private Handler routingHandler() {
         return exchange -> {
-            if (!isOriginAllowed(exchange) || !isHostAllowed(exchange)) {
+            if (!isOriginAllowed(exchange)) {
+                exchange.response().status(403).send("Forbidden");
+                return;
+            }
+            if (!isHostAllowed(exchange)) {
+                warnHostRejected(exchange);
                 exchange.response().status(403).send("Forbidden");
                 return;
             }
@@ -756,6 +782,20 @@ public final class McpServer {
         return isLoopbackHost(hostname);
     }
 
+    /**
+     * Logs once, the first time a request is refused by the default loopback-only Host check, so
+     * an operator who deployed under a public hostname without calling {@link Builder#allowHost}
+     * can see why every request gets 403. The server does not know its bind address, so this
+     * fires on the first refused request rather than at startup.
+     */
+    private void warnHostRejected(final Exchange exchange) {
+        if (allowedHosts.isEmpty() && hostRejectionWarned.compareAndSet(false, true)) {
+            recorder.warn("Refusing requests with Host '%s': no hosts are registered, so only loopback hosts"
+                    + " are accepted. Call allowHost(...) on the builder when serving under another hostname.",
+                sanitizeMessage(exchange.request().header("Host").orElse("")));
+        }
+    }
+
     private static String hostOnly(final String hostHeader) {
         if (hostHeader.startsWith("[")) {
             final var end = hostHeader.indexOf(']');
@@ -798,6 +838,8 @@ public final class McpServer {
     }
 
     private static final String SUPPORTED_PROTOCOL_VERSION = "2025-03-26";
+
+    private static final Duration MIN_REAPER_INTERVAL = Duration.ofMillis(10);
 
     private JsonObject handleInitialize(final JsonValue params) {
         final var paramsObj = params instanceof JsonObject p ? p : JsonObject.builder().build();
@@ -1061,7 +1103,7 @@ public final class McpServer {
             } else {
                 final var matched = findTemplate(uri);
                 if (matched == null) {
-                    return errorEnvelope(id, -32002, "Resource not found: " + uri);
+                    return errorEnvelope(id, -32002, "Resource not found: " + sanitizeMessage(uri));
                 }
                 content = matched.read(uri);
             }
@@ -1587,11 +1629,11 @@ public final class McpServer {
 
         /**
          * Sets the idle timeout after which inactive sessions are reaped (default 1 hour).
-         * A background daemon thread sweeps expired sessions at half the idle timeout interval,
-         * capped at 5 minutes. Activity on a session (any JSON-RPC request or SSE connection)
-         * resets the idle clock.
+         * A background thread sweeps expired sessions at half the idle timeout interval, kept
+         * between 10 milliseconds and 5 minutes. Activity on a session (any JSON-RPC request or SSE
+         * connection) resets the idle clock.
          *
-         * @param idleTimeout the idle duration; must be at least 1 minute
+         * @param idleTimeout the idle duration; must be positive
          * @return this builder
          */
         public Builder sessionIdleTimeout(final Duration idleTimeout) {
