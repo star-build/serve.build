@@ -104,9 +104,9 @@ public final class ApiKeyStrategy implements AuthStrategy {
         Objects.requireNonNull(paramName, "paramName");
         Objects.requireNonNull(validator, "validator");
         Objects.requireNonNull(recorder, "recorder");
-        recorder.warn("ApiKeyStrategy.fromQueryParam(\"" + paramName + "\") carries the API key in the URL —"
+        recorder.warn("ApiKeyStrategy.fromQueryParam(\"%s\") carries the API key in the URL —"
             + " it will appear in access logs, proxy logs, and browser history. Prefer fromHeader(...)"
-            + " unless the caller cannot set a header.");
+            + " unless the caller cannot set a header.", paramName);
         return new ApiKeyStrategy(req -> req.queryParam(paramName), validator);
     }
 

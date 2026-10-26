@@ -19,8 +19,13 @@
  */
 package build.serve.devtools;
 
+import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -59,6 +64,19 @@ class LiveReloadTests {
         try (var reload = LiveReload.watching(Path.of("/does/not/exist/abc123"))) {
             assertThat(reload).isNotNull();
         }
+    }
+
+    @Test
+    void shouldWarnAboutMissingDirectoryWhosePathContainsPercent() {
+        var output = new ByteArrayOutputStream();
+        var stream = new PrintStream(output, true, StandardCharsets.UTF_8);
+        var recorder = PrintStreamTelemetryRecorder.of(URI.create("serve://devtools-test"), stream, stream);
+
+        try (var reload = LiveReload.watching(recorder, Path.of("/does/not/exist/100%d"))) {
+            assertThat(reload).isNotNull();
+        }
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("/does/not/exist/100%d");
     }
 
     @Test

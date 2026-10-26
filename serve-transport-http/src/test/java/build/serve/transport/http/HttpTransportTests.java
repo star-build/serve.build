@@ -1,5 +1,6 @@
 package build.serve.transport.http;
 
+import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.serve.foundation.Handler;
 import build.serve.foundation.error.DefaultErrorHandler;
 import build.serve.foundation.error.HttpException;
@@ -8,11 +9,15 @@ import build.serve.foundation.option.RequestTimeout;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
+import java.io.PrintStream;
 import java.net.HttpURLConnection;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -104,6 +109,66 @@ class HttpTransportTests {
         var conn = get("/");
 
         assertThat(conn.getResponseCode()).isEqualTo(500);
+    }
+
+    @Test
+    void shouldRecordErrorHandlerThatRethrowsTheOriginalError() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var stream = new PrintStream(output, true, StandardCharsets.UTF_8);
+        var recorder = PrintStreamTelemetryRecorder.of(URI.create("serve://transport-http-test"), stream, stream);
+
+        transport = new HttpTransport(new InetSocketAddress("127.0.0.1", 0), 0,
+            exchange -> {
+                throw new IllegalStateException("rethrown failure");
+            },
+            (exchange, error) -> {
+                throw (IllegalStateException) error;
+            },
+            recorder);
+        transport.start();
+
+        try {
+            get("/").getResponseCode();
+        } catch (final IOException ignored) {
+            // the failing error handler never writes a response, so the connection is simply closed
+        }
+
+        awaitOutput(output, "rethrown failure");
+
+        assertThat(output.toString(StandardCharsets.UTF_8))
+            .contains("Error handler failed while handling")
+            .contains("rethrown failure")
+            .doesNotContain("Self-suppression");
+    }
+
+    @Test
+    void shouldRecordErrorHandlerFailure() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var stream = new PrintStream(output, true, StandardCharsets.UTF_8);
+        var recorder = PrintStreamTelemetryRecorder.of(URI.create("serve://transport-http-test"), stream, stream);
+
+        transport = new HttpTransport(new InetSocketAddress("127.0.0.1", 0), 0,
+            exchange -> {
+                throw new IllegalStateException("original failure");
+            },
+            (exchange, error) -> {
+                throw new IllegalArgumentException("error handler failure");
+            },
+            recorder);
+        transport.start();
+
+        try {
+            get("/").getResponseCode();
+        } catch (final IOException ignored) {
+            // the failing error handler never writes a response, so the connection is simply closed
+        }
+
+        awaitOutput(output, "original failure");
+
+        assertThat(output.toString(StandardCharsets.UTF_8))
+            .contains("Error handler failed while handling")
+            .contains("error handler failure")
+            .contains("original failure");
     }
 
     @Test
@@ -355,6 +420,17 @@ class HttpTransportTests {
         conn.setRequestMethod("GET");
         conn.connect();
         return conn;
+    }
+
+    /**
+     * Waits for the request thread to record the expected text, as it may do so after the client returns.
+     */
+    private static void awaitOutput(final ByteArrayOutputStream output, final String expected)
+        throws InterruptedException {
+        var deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!output.toString(StandardCharsets.UTF_8).contains(expected) && System.nanoTime() < deadline) {
+            Thread.sleep(25);
+        }
     }
 
     private String readBody(HttpURLConnection conn) throws Exception {

@@ -20,14 +20,26 @@
 package build.serve.application;
 
 import build.base.json.Json;
+import build.base.network.option.Port;
+import build.base.telemetry.foundation.PrintStreamTelemetryRecorder;
 import build.serve.foundation.error.BadRequestException;
 import build.serve.foundation.error.ErrorHandler;
 import build.serve.foundation.error.NotFoundException;
+import build.serve.foundation.option.ListenAddress;
+import build.serve.foundation.routing.Router;
 import build.serve.foundation.routing.RouterBuilder;
 import build.serve.testing.TestServer;
 import build.serve.transport.json.JsonErrorHandler;
 import build.serve.transport.json.JsonMiddleware;
 import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 class ErrorHandlingTests {
 
@@ -82,6 +94,36 @@ class ErrorHandlingTests {
             assert json.get("status").asNumber().toNumber().intValue() == 404;
             assert json.getString("message").equals("User 42 not found");
         }
+    }
+
+    @Test
+    void shouldRecordUnhandledExceptionsWithTheApplicationRecorder() throws Exception {
+        var output = new ByteArrayOutputStream();
+        var stream = new PrintStream(output, true, StandardCharsets.UTF_8);
+        var server = new ServerApplication.Implementation() {
+            @Override
+            protected Router configure() {
+                return RouterBuilder.create()
+                    .get("/throw-runtime", exchange -> {
+                        throw new RuntimeException("secret internal details");
+                    })
+                    .build();
+            }
+        };
+        server.recorder(PrintStreamTelemetryRecorder.of(URI.create("serve://application-test"), stream, stream));
+
+        try {
+            server.start(ListenAddress.of("127.0.0.1"), Port.of(0));
+
+            var url = URI.create("http://127.0.0.1:" + server.boundAddress().getPort() + "/throw-runtime").toURL();
+            var connection = (HttpURLConnection) url.openConnection();
+
+            assertThat(connection.getResponseCode()).isEqualTo(500);
+        } finally {
+            server.close();
+        }
+
+        assertThat(output.toString(StandardCharsets.UTF_8)).contains("Unhandled exception");
     }
 
     private TestServer createServer(final ErrorHandler errorHandler) {

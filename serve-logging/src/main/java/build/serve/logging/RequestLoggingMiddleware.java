@@ -28,7 +28,11 @@ import build.serve.foundation.util.JsonStrings;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -37,6 +41,11 @@ import java.util.Set;
  * <p>
  * Slow requests (above a configurable threshold) are logged at WARN level. Paths can be excluded from logging.
  * Use {@link #defaults()} for sensible defaults or {@link #builder()} for fine-grained configuration.
+ * <p>
+ * When headers are logged, the values of credential headers ({@code Authorization}, {@code Proxy-Authorization},
+ * {@code Cookie} and {@code Set-Cookie}) are redacted, as are any headers added with
+ * {@link Builder#redactHeader(String)}. Query strings are logged verbatim when enabled, so avoid
+ * {@link Builder#includeQueryString(boolean)} for endpoints that carry secrets in the URL.
  *
  * @author reed.vonredwitz
  * @since Mar-2026
@@ -46,9 +55,15 @@ public final class RequestLoggingMiddleware implements Middleware {
     private static final TelemetryRecorder DEFAULT_RECORDER =
         PrintStreamTelemetryRecorder.of(URI.create("serve://logging"), System.out, System.err);
 
+    private static final Set<String> DEFAULT_REDACTED_HEADERS =
+        Set.of("authorization", "proxy-authorization", "cookie", "set-cookie");
+
+    private static final String REDACTED = "[REDACTED]";
+
     private final boolean includeHeaders;
     private final boolean includeQueryString;
     private final Set<String> excludedPaths;
+    private final Set<String> redactedHeaders;
     private final Duration slowRequestThreshold;
     private final LogFormat format;
     private final TelemetryRecorder recorder;
@@ -57,6 +72,7 @@ public final class RequestLoggingMiddleware implements Middleware {
         this.includeHeaders = builder.includeHeaders;
         this.includeQueryString = builder.includeQueryString;
         this.excludedPaths = Set.copyOf(builder.excludedPaths);
+        this.redactedHeaders = Set.copyOf(builder.redactedHeaders);
         this.slowRequestThreshold = builder.slowRequestThreshold;
         this.format = builder.format;
         this.recorder = builder.recorder;
@@ -105,18 +121,20 @@ public final class RequestLoggingMiddleware implements Middleware {
                 final var slow = slowRequestThreshold != null && durationMs >= slowRequestThreshold.toMillis();
 
                 if (slow) {
-                    recorder.warn(format == LogFormat.JSON ? appendJsonField(message, "slow", true) : message + " [SLOW]");
+                    recorder.warn("%s", format == LogFormat.JSON
+                        ? appendJsonField(message, "slow", true)
+                        : message + " [SLOW]");
                 } else {
-                    recorder.info(message);
+                    recorder.info("%s", message);
                 }
 
                 if (includeHeaders && format != LogFormat.JSON) {
-                    recorder.info("  Headers: " + request.headers());
+                    recorder.info("  Headers: %s", redact(request.headers()));
                 }
             } catch (final Exception exception) {
                 final var durationMs = (System.nanoTime() - startTime) / 1_000_000;
-                recorder.error(method + " " + displayPath + " -> ERROR (" + durationMs + "ms) "
-                    + exception.getClass().getSimpleName());
+                recorder.error("%s %s -> ERROR (%dms) %s", method, displayPath, durationMs,
+                    exception.getClass().getSimpleName());
 
                 throw exception;
             }
@@ -133,6 +151,15 @@ public final class RequestLoggingMiddleware implements Middleware {
         }
 
         return request.path();
+    }
+
+    private Map<String, List<String>> redact(final Map<String, List<String>> headers) {
+        final var redacted = new LinkedHashMap<String, List<String>>();
+
+        headers.forEach((name, values) ->
+            redacted.put(name, redactedHeaders.contains(name.toLowerCase(Locale.ROOT)) ? List.of(REDACTED) : values));
+
+        return redacted;
     }
 
     private static String formatMessage(final LogFormat format, final String method, final String path,
@@ -173,6 +200,7 @@ public final class RequestLoggingMiddleware implements Middleware {
         private boolean includeHeaders;
         private boolean includeQueryString = false;
         private final Set<String> excludedPaths = new LinkedHashSet<>();
+        private final Set<String> redactedHeaders = new LinkedHashSet<>(DEFAULT_REDACTED_HEADERS);
         private Duration slowRequestThreshold;
         private LogFormat format = LogFormat.TEXT;
         private TelemetryRecorder recorder = DEFAULT_RECORDER;
@@ -200,6 +228,20 @@ public final class RequestLoggingMiddleware implements Middleware {
          */
         public Builder includeQueryString(final boolean includeQueryString) {
             this.includeQueryString = includeQueryString;
+
+            return this;
+        }
+
+        /**
+         * Redacts the value of an additional header (matched case-insensitively) when headers are logged,
+         * for example a custom API key header. The default credential headers are always redacted.
+         *
+         * @param name the header name
+         * @return this {@link Builder}
+         */
+        public Builder redactHeader(final String name) {
+            Objects.requireNonNull(name, "name");
+            redactedHeaders.add(name.toLowerCase(Locale.ROOT));
 
             return this;
         }

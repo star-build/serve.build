@@ -90,7 +90,7 @@ public final class LiveReload implements AutoCloseable {
         final Map<WatchKey, Path> keys = new HashMap<>();
         for (final var root : roots) {
             if (!Files.isDirectory(root)) {
-                recorder.warn("LiveReload: skipping non-existent path " + root);
+                recorder.warn("LiveReload: skipping non-existent path %s", root);
                 continue;
             }
             registerRecursive(root, keys);
@@ -212,7 +212,7 @@ public final class LiveReload implements AutoCloseable {
                 }
             });
         } catch (final IOException e) {
-            recorder.warn(e, "LiveReload: failed to register " + root);
+            recorder.warn(e, "LiveReload: failed to register %s", root);
         }
     }
 
@@ -224,25 +224,32 @@ public final class LiveReload implements AutoCloseable {
             } catch (final InterruptedException | ClosedWatchServiceException e) {
                 return;
             }
-            final var dir = keys.get(key);
-            boolean anyChange = false;
-            for (final var event : key.pollEvents()) {
-                if (event.kind() == StandardWatchEventKinds.OVERFLOW) {
-                    continue;
-                }
-                anyChange = true;
-                if (event.kind() == StandardWatchEventKinds.ENTRY_CREATE && dir != null) {
-                    final var path = dir.resolve((Path) event.context());
-                    if (Files.isDirectory(path)) {
-                        registerRecursive(path, keys);
+            try {
+                final var dir = keys.get(key);
+                boolean anyChange = false;
+                for (final var event : key.pollEvents()) {
+                    // an overflow means events were lost, so a change may have been missed
+                    anyChange = true;
+                    if (event.kind() == StandardWatchEventKinds.ENTRY_CREATE && dir != null) {
+                        final var path = dir.resolve((Path) event.context());
+                        if (Files.isDirectory(path)) {
+                            registerRecursive(path, keys);
+                        }
                     }
                 }
-            }
-            if (!key.reset()) {
-                keys.remove(key);
-            }
-            if (anyChange) {
-                broadcast();
+                if (anyChange) {
+                    broadcast();
+                }
+            } catch (final RuntimeException e) {
+                if (!running) {
+                    return;
+                }
+                recorder.error(e, "LiveReload: failed to process file system events");
+            } finally {
+                // always reset, or a failure above would silently stop events for this directory
+                if (!key.reset()) {
+                    keys.remove(key);
+                }
             }
         }
     }
