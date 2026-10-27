@@ -79,6 +79,108 @@ class TestServerTests {
     }
 
     @Test
+    void shouldSendOriginHeader() {
+        try (var server = TestServer.of(exchange -> {
+            final var value = exchange.request().header("Origin").orElse("none");
+            exchange.response().send("origin:" + value);
+        })) {
+            server.get("/")
+                .header("Origin", "https://evil.example")
+                .send()
+                .assertStatus(200)
+                .assertBody("origin:https://evil.example");
+        }
+    }
+
+    @Test
+    void shouldSendAllCustomHeaders() {
+        try (var server = TestServer.of(exchange -> {
+            final var first = exchange.request().header("X-First").orElse("none");
+            final var second = exchange.request().header("X-Second").orElse("none");
+            exchange.response().send(first + "," + second);
+        })) {
+            server.get("/")
+                .header("X-First", "one")
+                .header("X-Second", "two")
+                .send()
+                .assertBody("one,two");
+        }
+    }
+
+    @Test
+    void shouldSendPutBody() {
+        try (var server = TestServer.of(exchange -> exchange.response().send(
+            exchange.request().method() + ":" + exchange.request().bodyAsString()))) {
+            server.put("/resource")
+                .body("payload")
+                .send()
+                .assertStatus(200)
+                .assertBody("PUT:payload");
+        }
+    }
+
+    @Test
+    void shouldSendBinaryBodyUnchanged() {
+        final var bytes = new byte[]{0, 1, (byte) 0xFF, (byte) 0x80, 42};
+        try (var server = TestServer.of(exchange -> {
+            final var received = exchange.request().bodyAsStream().readAllBytes();
+            exchange.response().send(received.length + ":" + (received[2] & 0xFF));
+        })) {
+            server.post("/")
+                .body(bytes)
+                .send()
+                .assertBody("5:255");
+        }
+    }
+
+    @Test
+    void shouldReadBodyOfErrorResponse() {
+        try (var server = TestServer.of(exchange -> exchange.response().status(500).send("boom"))) {
+            final var response = server.get("/").send();
+
+            assertThat(response.status()).isEqualTo(500);
+            assertThat(response.body()).isEqualTo("boom");
+        }
+    }
+
+    @Test
+    void shouldReturnEmptyBodyWhenNoneSent() {
+        try (var server = TestServer.of(exchange -> exchange.response().status(204).send(""))) {
+            final var response = server.get("/").send();
+
+            assertThat(response.status()).isEqualTo(204);
+            assertThat(response.bodyBytes()).isEmpty();
+        }
+    }
+
+    @Test
+    void shouldFollowRedirects() {
+        try (var server = TestServer.of(exchange -> {
+            if (exchange.request().path().equals("/old")) {
+                exchange.response().redirect("/new");
+            } else {
+                exchange.response().send("arrived:" + exchange.request().path());
+            }
+        })) {
+            server.get("/old")
+                .send()
+                .assertStatus(200)
+                .assertBody("arrived:/new");
+        }
+    }
+
+    @Test
+    void shouldExposeResponseHeadersCaseInsensitively() {
+        try (var server = TestServer.of(exchange ->
+            exchange.response().header("X-Custom", "value").send("ok"))) {
+            final var response = server.get("/").send();
+
+            assertThat(response.header("x-custom")).isEqualTo("value");
+            response.assertHeader("X-Custom", "value");
+        }
+    }
+
+    @Test
     void assertStatusThrowsOnMismatch() {
         try (var server = TestServer.of(exchange -> exchange.response().status(404).send("nope"))) {
             final var response = server.get("/").send();

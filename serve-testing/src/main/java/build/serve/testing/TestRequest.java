@@ -22,10 +22,11 @@ package build.serve.testing;
 import build.base.json.JsonValue;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.UncheckedIOException;
-import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -37,6 +38,11 @@ import java.util.Map;
  * @since Mar-2026
  */
 public final class TestRequest {
+
+    private static final HttpClient CLIENT = HttpClient.newBuilder()
+        .version(HttpClient.Version.HTTP_1_1)
+        .followRedirects(HttpClient.Redirect.NORMAL)
+        .build();
 
     private final URI baseUri;
     private final String method;
@@ -52,6 +58,10 @@ public final class TestRequest {
 
     /**
      * Adds a header to the request.
+     * <p>
+     * The underlying {@link HttpClient} restricts {@code Host}, {@code Connection}, {@code Content-Length},
+     * {@code Expect}, and {@code Upgrade}; setting any of them causes {@link #send()} to throw an
+     * {@link IllegalArgumentException}.
      *
      * @param name  the header name
      * @param value the header value
@@ -111,54 +121,28 @@ public final class TestRequest {
      * @return the test response
      */
     public TestResponse send() {
+        final var builder = HttpRequest.newBuilder(baseUri.resolve(path))
+            .method(method, body == null
+                ? HttpRequest.BodyPublishers.noBody()
+                : HttpRequest.BodyPublishers.ofByteArray(body));
+
+        for (final var entry : headers.entrySet()) {
+            builder.header(entry.getKey(), entry.getValue());
+        }
+
         try {
-            final var url = baseUri.resolve(path).toURL();
-            final var conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod(method);
+            final var response = CLIENT.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
 
-            for (final var entry : headers.entrySet()) {
-                conn.setRequestProperty(entry.getKey(), entry.getValue());
-            }
-
-            if (body != null) {
-                conn.setDoOutput(true);
-                try (OutputStream os = conn.getOutputStream()) {
-                    os.write(body);
-                }
-            }
-
-            conn.connect();
-
-            final var status = conn.getResponseCode();
-            final var responseContentType = conn.getContentType();
-
-            // Read response headers
             final Map<String, String> responseHeaders = new LinkedHashMap<>();
-            for (int i = 0; ; i++) {
-                final var name = conn.getHeaderFieldKey(i);
-                final var value = conn.getHeaderField(i);
-                if (value == null) {
-                    break;
-                }
-                if (name != null) {
-                    responseHeaders.put(name, value);
-                }
-            }
+            response.headers().map().forEach((name, values) -> responseHeaders.put(name, values.getLast()));
 
-            // Read body
-            final byte[] responseBody;
-            final var inputStream = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
-            if (inputStream != null) {
-                try (inputStream) {
-                    responseBody = inputStream.readAllBytes();
-                }
-            } else {
-                responseBody = new byte[0];
-            }
-
-            return new TestResponse(status, responseBody, responseHeaders, responseContentType);
+            return new TestResponse(response.statusCode(), response.body(), responseHeaders,
+                response.headers().firstValue("Content-Type").orElse(null));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while sending " + method + " " + path, e);
         }
     }
 }
