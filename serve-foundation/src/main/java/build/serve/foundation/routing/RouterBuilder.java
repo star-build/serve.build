@@ -20,17 +20,21 @@
 package build.serve.foundation.routing;
 
 import build.base.json.JsonValue;
+import build.serve.foundation.DelegatingExchange;
 import build.serve.foundation.Exchange;
 import build.serve.foundation.Handler;
 import build.serve.foundation.Request;
-import build.serve.foundation.SimpleExchange;
 import build.serve.foundation.error.NotFoundException;
+import build.serve.foundation.http.Cookie;
 import build.serve.foundation.middleware.Middleware;
 
+import java.net.InetSocketAddress;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -246,9 +250,8 @@ public class RouterBuilder {
 
                     // For prefix routes (nested routers), rewrite the path
                     if (routeMatch.handler() instanceof Router) {
-                        final var rewritten = new SimpleExchange(
-                            new PrefixStrippedRequest(request, routeMatch.remainingPath()),
-                            exchange.response());
+                        final var rewritten = DelegatingExchange.withRequest(
+                            exchange, new PrefixStrippedRequest(request, routeMatch.remainingPath()));
 
                         rewritten.attribute(Exchange.PATH_PARAMS_ATTRIBUTE, mergedParams);
                         handler.handle(rewritten);
@@ -287,8 +290,10 @@ public class RouterBuilder {
         }
 
         @Override
-        public java.net.URI uri() {
-            return java.net.URI.create(strippedPath);
+        public URI uri() {
+            final var query = delegate.uri().getRawQuery();
+
+            return URI.create(query == null ? strippedPath : strippedPath + "?" + query);
         }
 
         @Override
@@ -322,6 +327,16 @@ public class RouterBuilder {
         }
 
         @Override
+        public List<Cookie> cookies() {
+            return delegate.cookies();
+        }
+
+        @Override
+        public Optional<Cookie> cookie(final String name) {
+            return delegate.cookie(name);
+        }
+
+        @Override
         public java.io.InputStream bodyAsStream() {
             return delegate.bodyAsStream();
         }
@@ -334,6 +349,11 @@ public class RouterBuilder {
         @Override
         public JsonValue bodyAsJson() {
             return delegate.bodyAsJson();
+        }
+
+        @Override
+        public Optional<InetSocketAddress> remoteAddress() {
+            return delegate.remoteAddress();
         }
     }
 }
