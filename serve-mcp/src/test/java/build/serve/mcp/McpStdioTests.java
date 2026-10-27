@@ -21,6 +21,7 @@ package build.serve.mcp;
 
 import build.base.json.Json;
 import build.base.json.JsonArray;
+import build.base.json.JsonNull;
 import build.base.json.JsonNumber;
 import build.base.json.JsonObject;
 import build.base.telemetry.Diagnostic;
@@ -128,12 +129,48 @@ class McpStdioTests {
 
         final var responses = out.toString(StandardCharsets.UTF_8).lines()
             .filter(l -> !l.isBlank())
-            .map(Json::parse)
+            .map(l -> Json.parse(l).asObject())
             .toList();
 
-        assertThat(responses).hasSize(1);
-        assertThat(responses.get(0).asObject().get("result").asObject()
-            .get("tools")).isInstanceOf(JsonArray.class);
+        assertThat(responses).hasSize(2);
+        assertThat(responses).anyMatch(r -> r.has("result")
+            && r.get("result").asObject().get("tools") instanceof JsonArray);
+    }
+
+    @Test
+    void shouldAnswerMalformedJsonLineWithParseError() {
+        final var out = new ByteArrayOutputStream();
+        server.stdioLoop(toStream("not valid json at all\n"), out);
+
+        final var response = Json.parse(out.toString(StandardCharsets.UTF_8).strip()).asObject();
+
+        assertThat(response.get("id")).isEqualTo(JsonNull.INSTANCE);
+        assertThat(response.get("error").asObject().get("code").asNumber().toNumber().intValue()).isEqualTo(-32700);
+    }
+
+    @Test
+    void shouldAnswerBatchOfNonObjectsWithInvalidRequestPerElement() {
+        final var out = new ByteArrayOutputStream();
+        server.stdioLoop(toStream("[1, \"x\"]\n"), out);
+
+        final var entries = Json.parse(out.toString(StandardCharsets.UTF_8).strip()).asArray().values();
+
+        assertThat(entries).hasSize(2).allSatisfy(entry -> {
+            assertThat(entry.asObject().get("id")).isEqualTo(JsonNull.INSTANCE);
+            assertThat(entry.asObject().get("error").asObject().get("code").asNumber().toNumber().intValue())
+                .isEqualTo(-32600);
+        });
+    }
+
+    @Test
+    void shouldAnswerScalarJsonLineWithInvalidRequest() {
+        final var out = new ByteArrayOutputStream();
+        server.stdioLoop(toStream("42\n"), out);
+
+        final var response = Json.parse(out.toString(StandardCharsets.UTF_8).strip()).asObject();
+
+        assertThat(response.get("id")).isEqualTo(JsonNull.INSTANCE);
+        assertThat(response.get("error").asObject().get("code").asNumber().toNumber().intValue()).isEqualTo(-32600);
     }
 
     @Test
@@ -317,7 +354,7 @@ class McpStdioTests {
     }
 
     @Test
-    void shouldWarnWithTheCauseWhenLineIsNotAnObject() {
+    void shouldWarnWhenLineIsNotAnObject() {
         final var capturing = new CapturingTelemetryRecorder();
         final var tracingServer = McpServer.builder("tracing-server", "1.0.0")
             .recorder(capturing)
@@ -326,8 +363,7 @@ class McpStdioTests {
         tracingServer.stdioLoop(toStream("42\n"), new ByteArrayOutputStream());
 
         assertThat(capturing.warns()).hasSize(1);
-        assertThat(capturing.warns().getFirst()).contains("Failed to dispatch stdio request");
-        assertThat(capturing.warnThrowables()).hasSize(1);
+        assertThat(capturing.warns().getFirst()).contains("neither a request nor a batch");
     }
 
     @Test

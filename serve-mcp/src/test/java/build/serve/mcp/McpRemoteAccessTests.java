@@ -79,6 +79,16 @@ class McpRemoteAccessTests {
     }
 
     @Test
+    void shouldRefuseUnauthenticatedPeerWithNoRemoteAddress() throws Exception {
+        final var server = McpServer.builder("remote-server", "1.0.0").build();
+        final var response = new StubResponse();
+
+        server.handler().handle(new SimpleExchange(new StubRequest((InetSocketAddress) null), response));
+
+        assertThat(response.status).isEqualTo(401);
+    }
+
+    @Test
     void shouldAcceptAuthenticatedRemotePeer() throws Exception {
         final var server = McpServer.builder("remote-server", "1.0.0").build();
 
@@ -174,7 +184,7 @@ class McpRemoteAccessTests {
 
         @Override
         public Optional<InetSocketAddress> remoteAddress() {
-            return Optional.of(peer);
+            return Optional.ofNullable(peer);
         }
     }
 
