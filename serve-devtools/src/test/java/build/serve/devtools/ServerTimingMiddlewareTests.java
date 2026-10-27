@@ -64,6 +64,20 @@ class ServerTimingMiddlewareTests {
     }
 
     @Test
+    void shouldHonourRemoveHeader() throws Exception {
+        final var response = new StubExchange.StubResponse();
+        final var handler = ServerTimingMiddleware.create().apply(exchange -> {
+            exchange.response().header("X-Debug", "1");
+            exchange.response().removeHeader("X-Debug");
+            exchange.response().send("hi");
+        });
+
+        handler.handle(StubExchange.get("/", response));
+
+        assertThat(response.headers).doesNotContainKey("X-Debug");
+    }
+
+    @Test
     void shouldPassRequestThrough() throws Exception {
         final var response = new StubExchange.StubResponse();
         final var handler = ServerTimingMiddleware.create().apply(exchange -> {

@@ -27,12 +27,12 @@ import build.serve.foundation.routing.Router;
 import build.serve.foundation.routing.RouterBuilder;
 import org.junit.jupiter.api.Test;
 
-import javax.net.ssl.SSLContext;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import javax.net.ssl.SSLContext;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

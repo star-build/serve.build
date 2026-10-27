@@ -24,16 +24,19 @@ import build.serve.foundation.Exchange;
 import build.serve.foundation.Request;
 import build.serve.foundation.Response;
 import build.serve.foundation.SimpleExchange;
+import build.serve.foundation.http.Cookie;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.InflaterInputStream;
 
@@ -188,6 +191,121 @@ class CompressionMiddlewareTests {
         assertThat(new String(response.body)).isEqualTo(LARGE_BODY);
     }
 
+    @Test
+    void shouldForwardCookieSetInsideCompressedResponse() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+        var session = Cookie.of("session", "abc123");
+
+        middleware.apply(ex -> {
+            ex.response().cookie(session);
+            ex.response().header("Content-Type", "text/plain");
+            ex.response().send(LARGE_BODY);
+        }).handle(exchange);
+
+        assertThat(response.cookies).containsExactly(session);
+    }
+
+    @Test
+    void shouldForwardDeletedCookieSetInsideCompressedResponse() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+
+        middleware.apply(ex -> {
+            ex.response().deleteCookie("session");
+            ex.response().header("Content-Type", "text/plain");
+            ex.response().send(LARGE_BODY);
+        }).handle(exchange);
+
+        assertThat(response.cookies).singleElement().satisfies(cookie -> {
+            assertThat(cookie.name()).isEqualTo("session");
+            assertThat(cookie.maxAgeSeconds()).isZero();
+        });
+    }
+
+    @Test
+    void shouldKeepStatusAndHeadersForJsonResponse() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+        var payload = Map.of("id", 7);
+
+        middleware.apply(ex -> ex.response()
+            .status(201)
+            .header("Location", "/things/7")
+            .json(payload)).handle(exchange);
+
+        assertThat(response.statusCode).isEqualTo(201);
+        assertThat(response.headers).containsEntry("Location", "/things/7");
+        assertThat(response.jsonBody).isEqualTo(payload);
+    }
+
+    @Test
+    void shouldHonourRemoveHeaderInsideCompressedResponse() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+
+        middleware.apply(ex -> {
+            ex.response().header("X-Debug", "1");
+            ex.response().removeHeader("X-Debug");
+            ex.response().header("Content-Type", "text/plain");
+            ex.response().send(LARGE_BODY);
+        }).handle(exchange);
+
+        assertThat(response.headers).doesNotContainKey("X-Debug");
+    }
+
+    @Test
+    void shouldCompressWhenContentEncodingIsRemovedInsideCompressedResponse() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+
+        middleware.apply(ex -> {
+            ex.response().header("Content-Encoding", "identity");
+            ex.response().removeHeader("content-encoding");
+            ex.response().header("Content-Type", "text/plain");
+            ex.response().send(LARGE_BODY);
+        }).handle(exchange);
+
+        assertThat(response.headers).containsEntry("Content-Encoding", "gzip");
+    }
+
+    @Test
+    void shouldNotCompressWhenContentTypeIsRemovedInsideCompressedResponse() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+
+        middleware.apply(ex -> {
+            ex.response().header("Content-Type", "text/plain");
+            ex.response().removeHeader("content-type");
+            ex.response().send(LARGE_BODY);
+        }).handle(exchange);
+
+        assertThat(response.headers).doesNotContainKey("Content-Encoding");
+        assertThat(new String(response.body)).isEqualTo(LARGE_BODY);
+    }
+
+    @Test
+    void shouldPreserveExchangeStateInsideCompression() throws Exception {
+        var middleware = CompressionMiddleware.defaults();
+        var response = new StubResponse();
+        var exchange = createExchange("gzip", response);
+        exchange.attribute("user", "alice");
+        var seen = new AtomicReference<Optional<String>>();
+
+        middleware.apply(ex -> {
+            seen.set(ex.attribute("user", String.class));
+            ex.response().send("ok");
+        }).handle(exchange);
+
+        assertThat(seen.get()).contains("alice");
+    }
+
     private static Exchange createExchange(final String acceptEncoding, final StubResponse response) {
         return new SimpleExchange(new StubRequest(acceptEncoding), response);
     }
@@ -282,8 +400,10 @@ class CompressionMiddlewareTests {
     private static final class StubResponse implements Response {
 
         final Map<String, String> headers = new LinkedHashMap<>();
+        final List<Cookie> cookies = new ArrayList<>();
         int statusCode = 200;
         byte[] body;
+        Object jsonBody;
 
         @Override
         public Response status(final int statusCode) {
@@ -315,7 +435,18 @@ class CompressionMiddlewareTests {
         }
 
         @Override
+        public void removeHeader(final String name) {
+            headers.remove(name);
+        }
+
+        @Override
         public void json(final Object body) {
+            this.jsonBody = body;
+        }
+
+        @Override
+        public void cookie(final Cookie cookie) {
+            cookies.add(cookie);
         }
 
         @Override
