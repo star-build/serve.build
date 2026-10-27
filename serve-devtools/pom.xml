@@ -29,11 +29,6 @@
 
         <dependency>
             <groupId>build.base</groupId>
-            <artifactId>base-configuration</artifactId>
-        </dependency>
-
-        <dependency>
-            <groupId>build.base</groupId>
             <artifactId>base-telemetry</artifactId>
         </dependency>
 

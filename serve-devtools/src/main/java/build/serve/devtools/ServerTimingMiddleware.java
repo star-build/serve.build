@@ -19,17 +19,14 @@
  */
 package build.serve.devtools;
 
-import build.base.configuration.Option;
-import build.serve.foundation.Exchange;
+import build.serve.foundation.DelegatingExchange;
 import build.serve.foundation.Handler;
-import build.serve.foundation.Request;
 import build.serve.foundation.Response;
 import build.serve.foundation.http.Cookie;
 import build.serve.foundation.middleware.Middleware;
 
 import java.io.OutputStream;
 import java.util.Locale;
-import java.util.Optional;
 
 /**
  * A {@link Middleware} that emits a {@code Server-Timing} header on each response so the
@@ -69,7 +66,7 @@ public final class ServerTimingMiddleware implements Middleware {
         return exchange -> {
             final long start = System.nanoTime();
             final var timingResponse = new TimingResponse(exchange.response(), start);
-            next.handle(new WrappedExchange(exchange, timingResponse));
+            next.handle(DelegatingExchange.withResponse(exchange, timingResponse));
         };
     }
 
@@ -119,6 +116,11 @@ public final class ServerTimingMiddleware implements Middleware {
         }
 
         @Override
+        public void removeHeader(final String name) {
+            delegate.removeHeader(name);
+        }
+
+        @Override
         public void send(final String body) {
             commit();
             delegate.send(body);
@@ -150,51 +152,6 @@ public final class ServerTimingMiddleware implements Middleware {
         public OutputStream bodyAsStream() {
             commit();
             return delegate.bodyAsStream();
-        }
-    }
-
-    /**
-     * Forwards every {@link Exchange} method to a delegate except {@link #response()}, which
-     * returns the wrapped timing response.
-     */
-    private static final class WrappedExchange implements Exchange {
-
-        private final Exchange delegate;
-        private final Response response;
-
-        WrappedExchange(final Exchange delegate, final Response response) {
-            this.delegate = delegate;
-            this.response = response;
-        }
-
-        @Override
-        public Request request() {
-            return delegate.request();
-        }
-
-        @Override
-        public Response response() {
-            return response;
-        }
-
-        @Override
-        public <T extends Option> Optional<T> option(final Class<T> optionClass) {
-            return delegate.option(optionClass);
-        }
-
-        @Override
-        public void option(final Option option) {
-            delegate.option(option);
-        }
-
-        @Override
-        public <T> Optional<T> attribute(final String key, final Class<T> type) {
-            return delegate.attribute(key, type);
-        }
-
-        @Override
-        public void attribute(final String key, final Object value) {
-            delegate.attribute(key, value);
         }
     }
 }

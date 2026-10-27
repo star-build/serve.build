@@ -19,9 +19,10 @@
  */
 package build.serve.compression;
 
+import build.serve.foundation.DelegatingExchange;
 import build.serve.foundation.Handler;
 import build.serve.foundation.Response;
-import build.serve.foundation.SimpleExchange;
+import build.serve.foundation.http.Cookie;
 import build.serve.foundation.middleware.Middleware;
 
 import java.io.ByteArrayOutputStream;
@@ -115,7 +116,7 @@ public final class CompressionMiddleware implements Middleware {
             }
 
             final var bufferingResponse = new BufferingResponse(response);
-            final var wrappedExchange = new SimpleExchange(exchange.request(), bufferingResponse);
+            final var wrappedExchange = DelegatingExchange.withResponse(exchange, bufferingResponse);
 
             next.handle(wrappedExchange);
 
@@ -264,8 +265,37 @@ public final class CompressionMiddleware implements Middleware {
         }
 
         @Override
+        public void removeHeader(final String name) {
+            headers.keySet().removeIf(key -> key.equalsIgnoreCase(name));
+
+            if ("Content-Type".equalsIgnoreCase(name)) {
+                contentType = null;
+            }
+
+            if ("Content-Encoding".equalsIgnoreCase(name)) {
+                hasContentEncoding = false;
+            }
+        }
+
+        /**
+         * Serialization belongs to the transport, so the status and headers buffered so far are applied to the
+         * delegate before it writes the body, which is therefore not compressed.
+         */
+        @Override
         public void json(final Object body) {
+            delegate.status(statusCode);
+            headers.forEach(delegate::header);
             delegate.json(body);
+        }
+
+        @Override
+        public void cookie(final Cookie cookie) {
+            delegate.cookie(cookie);
+        }
+
+        @Override
+        public void deleteCookie(final String name) {
+            delegate.deleteCookie(name);
         }
 
         @Override

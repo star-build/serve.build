@@ -147,6 +147,11 @@ final class StubExchange {
         }
 
         @Override
+        public void removeHeader(final String name) {
+            headers.remove(name);
+        }
+
+        @Override
         public void send(final String body) {
             this.body = body;
             this.sent = true;
