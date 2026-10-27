@@ -186,13 +186,29 @@ public final class McpServer implements AutoCloseable {
         }
 
         final var sessionId = exchange.request().header(SESSION_HEADER);
-        final var parsed = Json.parse(exchange.request().bodyAsString());
+        final var body = exchange.request().bodyAsString();
+        final JsonValue parsed;
+        try {
+            parsed = Json.parse(body);
+        } catch (final RuntimeException e) {
+            refuse(exchange, McpJson.parseError());
+            return;
+        }
 
         if (parsed instanceof JsonArray batch) {
             postBatch(exchange, batch, sessionId);
+        } else if (parsed instanceof JsonObject request) {
+            postRequest(exchange, request, sessionId);
         } else {
-            postRequest(exchange, parsed.asObject(), sessionId);
+            refuse(exchange, McpJson.invalidRequest());
         }
+    }
+
+    private static void refuse(final Exchange exchange, final JsonObject error) {
+        exchange.response()
+            .status(400)
+            .header("Content-Type", "application/json")
+            .send(error.toJsonString().getBytes(StandardCharsets.UTF_8));
     }
 
     private void postBatch(final Exchange exchange, final JsonArray batch, final Optional<String> sessionId) {

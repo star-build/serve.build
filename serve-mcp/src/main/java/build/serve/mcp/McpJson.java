@@ -64,6 +64,20 @@ final class McpJson {
         return builder.build();
     }
 
+    /**
+     * The response to a message that could not be parsed as JSON. It carries no id, as there is none to echo.
+     */
+    static JsonObject parseError() {
+        return errorEnvelope(JsonNull.INSTANCE, McpError.PARSE_ERROR, "Parse error");
+    }
+
+    /**
+     * The response to a message that is valid JSON but is neither a request object nor a batch.
+     */
+    static JsonObject invalidRequest() {
+        return errorEnvelope(JsonNull.INSTANCE, McpError.INVALID_REQUEST, "Invalid Request");
+    }
+
     static JsonObject notification(final String method) {
         return JsonObject.builder()
             .put("jsonrpc", "2.0")

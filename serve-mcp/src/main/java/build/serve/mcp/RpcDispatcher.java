@@ -175,7 +175,7 @@ final class RpcDispatcher {
         final var remaining = new CountDownLatch(batch.values().size());
         for (final var item : batch.values()) {
             if (!(item instanceof JsonObject request)) {
-                responses.add(McpJson.errorEnvelope(JsonNull.INSTANCE, McpError.INVALID_REQUEST, "Invalid Request"));
+                responses.add(McpJson.invalidRequest());
                 remaining.countDown();
                 continue;
             }

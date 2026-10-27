@@ -121,7 +121,7 @@ final class RequestGuard {
     /**
      * A peer that is not on loopback must have been authenticated by a layer in front of this
      * handler unless {@link McpServer.Builder#allowUnauthenticatedRemote()} was called. A
-     * transport that cannot report a peer address is not restricted.
+     * request that does not report a peer address cannot be shown to be local, so it is refused.
      */
     private boolean isRemoteAccessAllowed(final Exchange exchange) {
         if (allowUnauthenticatedRemote || RequestContext.PRINCIPAL.isBound()) {
@@ -129,7 +129,7 @@ final class RequestGuard {
         }
         return exchange.request().remoteAddress()
             .map(address -> address.getAddress() != null && address.getAddress().isLoopbackAddress())
-            .orElse(true);
+            .orElse(false);
     }
 
     private static String hostOnly(final String hostHeader) {

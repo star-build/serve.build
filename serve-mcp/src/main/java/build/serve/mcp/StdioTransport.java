@@ -95,7 +95,13 @@ final class StdioTransport {
                     try {
                         parsed = Json.parse(line);
                     } catch (final RuntimeException e) {
-                        recorder.warn(e, "Discarding malformed stdio line");
+                        recorder.warn(e, "Rejecting malformed stdio line");
+                        output.offer(Optional.of(McpJson.parseError().toJsonString()));
+                        continue;
+                    }
+                    if (!(parsed instanceof JsonArray) && !(parsed instanceof JsonObject)) {
+                        recorder.warn("Rejecting stdio line that is neither a request nor a batch");
+                        output.offer(Optional.of(McpJson.invalidRequest().toJsonString()));
                         continue;
                     }
                     final var permits = parsed instanceof JsonArray batch ? dispatcher.permitsFor(batch) : 1;
