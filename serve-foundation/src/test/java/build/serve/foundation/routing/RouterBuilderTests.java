@@ -6,11 +6,17 @@ import build.serve.foundation.Request;
 import build.serve.foundation.Response;
 import build.serve.foundation.SimpleExchange;
 import build.serve.foundation.error.NotFoundException;
+import build.serve.foundation.http.Cookie;
 import build.serve.foundation.middleware.Middleware;
+import build.serve.foundation.option.MaxRequestSize;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetSocketAddress;
+import java.net.URI;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -380,6 +386,130 @@ class RouterBuilderTests {
         assertThat(order).containsExactly("log", "logged");
     }
 
+    // --- nested router request delegation ---
+
+    @Test
+    void shouldDelegateRemoteAddressToWrappedRequestInNestedRouter() throws Exception {
+        var captured = new AtomicReference<Optional<InetSocketAddress>>();
+        var peer = InetSocketAddress.createUnresolved("203.0.113.7", 54321);
+
+        var subRouter = RouterBuilder.create()
+            .get("/whoami", exchange -> captured.set(exchange.request().remoteAddress()))
+            .build();
+
+        var router = RouterBuilder.create()
+            .route("/api", subRouter)
+            .build();
+
+        router.handle(exchangeWith(stubRequest("GET", "/api/whoami").withRemoteAddress(peer), new StubResponse()));
+
+        assertThat(captured.get()).contains(peer);
+    }
+
+    @Test
+    void shouldDelegateRemoteAddressThroughDeeplyNestedRouters() throws Exception {
+        var captured = new AtomicReference<Optional<InetSocketAddress>>();
+        var peer = InetSocketAddress.createUnresolved("198.51.100.2", 4242);
+
+        var inner = RouterBuilder.create()
+            .get("/whoami", exchange -> captured.set(exchange.request().remoteAddress()))
+            .build();
+
+        var middle = RouterBuilder.create()
+            .route("/b", inner)
+            .build();
+
+        var outer = RouterBuilder.create()
+            .route("/a", middle)
+            .build();
+
+        outer.handle(exchangeWith(stubRequest("GET", "/a/b/whoami").withRemoteAddress(peer), new StubResponse()));
+
+        assertThat(captured.get()).contains(peer);
+    }
+
+    @Test
+    void shouldDelegateCookiesToWrappedRequestInNestedRouter() throws Exception {
+        var cookies = new AtomicReference<List<Cookie>>();
+        var single = new AtomicReference<Optional<Cookie>>();
+        var session = Cookie.of("session", "abc123");
+
+        var subRouter = RouterBuilder.create()
+            .get("/me", exchange -> {
+                cookies.set(exchange.request().cookies());
+                single.set(exchange.request().cookie("session"));
+            })
+            .build();
+
+        var router = RouterBuilder.create()
+            .route("/api", subRouter)
+            .build();
+
+        router.handle(exchangeWith(stubRequest("GET", "/api/me").withCookies(List.of(session)), new StubResponse()));
+
+        assertThat(cookies.get()).containsExactly(session);
+        assertThat(single.get()).contains(session);
+    }
+
+    @Test
+    void shouldPreserveParentExchangeAttributesInNestedRouter() throws Exception {
+        var captured = new AtomicReference<Optional<String>>();
+
+        var subRouter = RouterBuilder.create()
+            .get("/me", exchange -> captured.set(exchange.attribute("user", String.class)))
+            .build();
+
+        var router = RouterBuilder.create()
+            .route("/api", subRouter)
+            .build();
+
+        var incoming = exchangeFor("GET", "/api/me");
+        incoming.attribute("user", "alice");
+
+        router.handle(incoming);
+
+        assertThat(captured.get()).contains("alice");
+    }
+
+    @Test
+    void shouldPreserveParentExchangeOptionsInNestedRouter() throws Exception {
+        var captured = new AtomicReference<Optional<MaxRequestSize>>();
+        var limit = MaxRequestSize.of(1234);
+
+        var subRouter = RouterBuilder.create()
+            .get("/limit", exchange -> captured.set(exchange.option(MaxRequestSize.class)))
+            .build();
+
+        var router = RouterBuilder.create()
+            .route("/api", subRouter)
+            .build();
+
+        var incoming = exchangeFor("GET", "/api/limit");
+        incoming.option(limit);
+
+        router.handle(incoming);
+
+        assertThat(captured.get()).contains(limit);
+    }
+
+    @Test
+    void shouldKeepQueryStringInUriOfWrappedRequestInNestedRouter() throws Exception {
+        var captured = new AtomicReference<URI>();
+
+        var subRouter = RouterBuilder.create()
+            .get("/items", exchange -> captured.set(exchange.request().uri()))
+            .build();
+
+        var router = RouterBuilder.create()
+            .route("/api", subRouter)
+            .build();
+
+        router.handle(exchangeWith(stubRequest("GET", "/api/items").withQuery("page=2&sort=name"), new StubResponse()));
+
+        assertThat(captured.get().getPath()).isEqualTo("/items");
+        assertThat(captured.get().getRawQuery()).isEqualTo("page=2&sort=name");
+    }
+
     // --- Helpers ---
 
     private static Exchange exchangeFor(String method, String path) {
@@ -400,10 +530,38 @@ class RouterBuilderTests {
     private static class StubRequest implements Request {
         private final String method;
         private final String path;
+        private InetSocketAddress remoteAddress;
+        private List<Cookie> cookies = List.of();
+        private String query;
 
         StubRequest(String method, String path) {
             this.method = method;
             this.path = path;
+        }
+
+        StubRequest withQuery(String query) {
+            this.query = query;
+            return this;
+        }
+
+        StubRequest withRemoteAddress(InetSocketAddress remoteAddress) {
+            this.remoteAddress = remoteAddress;
+            return this;
+        }
+
+        StubRequest withCookies(List<Cookie> cookies) {
+            this.cookies = cookies;
+            return this;
+        }
+
+        @Override
+        public Optional<InetSocketAddress> remoteAddress() {
+            return Optional.ofNullable(remoteAddress);
+        }
+
+        @Override
+        public List<Cookie> cookies() {
+            return cookies;
         }
 
         @Override
@@ -413,7 +571,7 @@ class RouterBuilderTests {
 
         @Override
         public java.net.URI uri() {
-            return java.net.URI.create(path);
+            return java.net.URI.create(query == null ? path : path + "?" + query);
         }
 
         @Override
